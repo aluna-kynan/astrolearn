@@ -753,8 +753,16 @@ let boosterDecors = [];
 let smokeImage = null;
 let smokeParticles = [];
 let lastSmokeSpawnTime = 0;
-// Enemy rocket image
+// Enemy rocket images
 let enemyRocketImage = null;
+let enemySniperImage = null;
+let enemySpinnerImage = null;
+// Visual Effects State
+let screenShakeUntil = 0;
+let screenShakeIntensity = 0;
+let shakeX = 0;
+let shakeY = 0;
+let muzzleFlashUntil = 0;
 // Explosion particles
 let explosionImage = null;
 let explosionParticles = [];
@@ -765,6 +773,8 @@ let bulletLaserImage = null; // bullet_68.png
 // Boss rocket image
 let bossRocketImage = null;
 let bossBulletImage = null; // bullet_4_2_0.png
+let laserBeamImage = null; // laser_6.png
+let weaponPowerUpImage = null;
 // Additional scrolling decorations
 let spaceStation1Image = null;
 let spaceStation2Image = null;
@@ -815,9 +825,9 @@ const MOVING_ASTEROID_COUNT = {
     hard: 25
 };
 const ENEMY_ROCKET_COUNT = {
-    easy: 12,
-    medium: 18,
-    hard: 25
+    easy: 3,
+    medium: 5,
+    hard: 9
 };
 // Stats
 let gameStats = {
@@ -1040,9 +1050,13 @@ function startMiniGame(spaceship, difficulty, callback) {
     smokeImage.src = '/assets/Smoke Texture.png';
     smokeParticles = [];
     lastSmokeSpawnTime = 0;
-    // Load enemy rocket image
+    // Load enemy rocket images
     enemyRocketImage = new Image();
     enemyRocketImage.src = '/assets/roket_musuh.png';
+    enemySniperImage = new Image();
+    enemySniperImage.src = '/assets/main_7_1_1.png';
+    enemySpinnerImage = new Image();
+    enemySpinnerImage.src = '/assets/sub_7_2.png';
     // Load explosion image
     explosionImage = new Image();
     explosionImage.src = '/assets/bullet_16.png';
@@ -1059,6 +1073,10 @@ function startMiniGame(spaceship, difficulty, callback) {
     bossRocketImage.src = '/assets/roket_bos.png';
     bossBulletImage = new Image();
     bossBulletImage.src = '/assets/bullet_4_2_0.png';
+    laserBeamImage = new Image();
+    laserBeamImage.src = '/assets/laser_6.png';
+    weaponPowerUpImage = new Image();
+    weaponPowerUpImage.src = '/assets/upwewapon.png';
     // Load additional scrolling decoration images
     spaceStation1Image = new Image();
     spaceStation1Image.src = '/assets/spaceStation_8.1.png';
@@ -1141,6 +1159,30 @@ function setupControls() {
     };
     document.addEventListener('mousedown', mouseDownHandler);
     document.addEventListener('mouseup', mouseUpHandler);
+    // Touch events for mobile firing
+    const touchStartHandler = (e)=>{
+        if (!canvas) return;
+        e.preventDefault();
+        isFiring = true;
+        if (e.touches.length > 0) {
+            const rect = canvas.getBoundingClientRect();
+            crosshairX = e.touches[0].clientX - rect.left;
+            crosshairY = e.touches[0].clientY - rect.top;
+            if (player && canvas) {
+                targetX = Math.max(player.width / 2, Math.min(canvas.width - player.width / 2, crosshairX));
+                targetY = Math.max(player.height / 2, Math.min(canvas.height - player.height / 2, crosshairY));
+            }
+        }
+    };
+    const touchEndHandler = ()=>{
+    // Keep firing on mobile (auto-fire)
+    };
+    canvas.addEventListener('touchstart', touchStartHandler, {
+        passive: false
+    });
+    canvas.addEventListener('touchend', touchEndHandler, {
+        passive: false
+    });
 }
 // ============ GAME LOOP ============
 function update() {
@@ -1150,6 +1192,16 @@ function update() {
     const now = Date.now();
     const elapsed = now - gameStartTime;
     const isInDodgePhase = elapsed < DODGE_PHASE_DURATION;
+    // Screen Shake Logic
+    if (now < screenShakeUntil) {
+        shakeX = (Math.random() - 0.5) * screenShakeIntensity;
+        shakeY = (Math.random() - 0.5) * screenShakeIntensity;
+    } else {
+        shakeX = 0;
+        shakeY = 0;
+    }
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
     // Draw background
     drawBackground();
     // Handle keyboard movement
@@ -1220,6 +1272,7 @@ function update() {
     // Draw crosshair
     drawCrosshair();
     // Draw UI overlay
+    ctx.restore(); // Restore context (stop shaking for UI)
     drawUI(isInDodgePhase, elapsed);
     // Check conditions
     if (checkWinCondition()) {
@@ -1242,7 +1295,6 @@ function update() {
     if (secondaryWeapon && Date.now() > secondaryWeaponEndTime) {
         secondaryWeapon = null;
         secondaryWeaponConfig = null;
-        updateUI();
         audioManager.playSoundEffect('powerup');
     }
     // Collision damage checks (only if not immune)
@@ -1279,7 +1331,6 @@ function applyDamage(amount) {
             playerLifeHP = 0;
         }
     }
-    updateUI();
 }
 // ============ BACKGROUND ============
 function initBoosterDecors(canvasRef) {
@@ -1457,8 +1508,18 @@ function drawBackground() {
     drawScrollingDecors();
 }
 // ============ EXPLOSION PARTICLES ============
+function triggerScreenShake(intensity, duration) {
+    screenShakeIntensity = intensity;
+    screenShakeUntil = Date.now() + duration;
+}
 function spawnExplosion(x, y) {
     let size = arguments.length > 2 && arguments[2] !== void 0 ? arguments[2] : 1;
+    // Trigger shake based on explosion size
+    if (size >= 2) {
+        triggerScreenShake(10, 300); // Big shake for boss
+    } else if (size >= 1.2) {
+        triggerScreenShake(5, 150); // Medium shake
+    }
     // Spawn multiple explosion particles for a more dramatic effect
     const particleCount = 3 + Math.floor(Math.random() * 3);
     for(let i = 0; i < particleCount; i++){
@@ -1538,26 +1599,30 @@ function drawCrosshair() {
 // ============ UI OVERLAY ============
 function drawUI(isInDodgePhase, elapsed) {
     if (!ctx || !canvas || !player) return;
+    // Mobile-responsive scaling
+    const isMobile = canvas.width < 768;
+    const scale = isMobile ? 0.7 : 1;
     // ===== TOP CENTER: LIVES & HP BAR =====
-    const hpBarWidth = 200;
-    const hpBarHeight = 18;
+    const hpBarWidth = 200 * scale;
+    const hpBarHeight = 18 * scale;
     const hpBarX = (canvas.width - hpBarWidth) / 2;
-    const hpBarY = 18;
+    const hpBarY = 12 * scale;
     // Background panel
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.beginPath();
-    ctx.roundRect(hpBarX - 100, hpBarY - 4, hpBarWidth + 200, hpBarHeight + 12, 8);
+    ctx.roundRect(hpBarX - 80 * scale, hpBarY - 4 * scale, hpBarWidth + 160 * scale, hpBarHeight + 12 * scale, 8);
     ctx.fill();
     // Draw lives (hearts)
-    ctx.font = '18px Arial';
+    ctx.font = "".concat(Math.floor(16 * scale), "px Arial");
     ctx.textAlign = 'left';
+    const heartSpacing = 22 * scale;
     for(let i = 0; i < PLAYER_MAX_LIVES; i++){
         if (i < playerLives) {
             ctx.fillStyle = '#ff4466';
-            ctx.fillText('❤️', hpBarX - 90 + i * 25, hpBarY + 16);
+            ctx.fillText('❤️', hpBarX - 70 * scale + i * heartSpacing, hpBarY + 14 * scale);
         } else {
             ctx.fillStyle = 'rgba(255, 68, 102, 0.3)';
-            ctx.fillText('🖤', hpBarX - 90 + i * 25, hpBarY + 16);
+            ctx.fillText('🖤', hpBarX - 70 * scale + i * heartSpacing, hpBarY + 14 * scale);
         }
     }
     // HP bar empty
@@ -1575,57 +1640,59 @@ function drawUI(isInDodgePhase, elapsed) {
     ctx.roundRect(hpBarX, hpBarY, hpBarWidth * hpPercent, hpBarHeight, 5);
     ctx.fill();
     // HP text
-    ctx.font = 'bold 12px Orbitron, sans-serif';
+    ctx.font = "bold ".concat(Math.floor(10 * scale), "px Orbitron, sans-serif");
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
-    ctx.fillText("".concat(playerLifeHP, "/").concat(LIFE_MAX_HP), canvas.width / 2, hpBarY + 14);
+    ctx.fillText("".concat(playerLifeHP, "/").concat(LIFE_MAX_HP), canvas.width / 2, hpBarY + 12 * scale);
     // Immunity indicator
     if (isImmune) {
         const immuneTimeLeft = Math.max(0, (immuneEndTime - Date.now()) / 1000);
-        ctx.font = 'bold 14px Orbitron, sans-serif';
+        ctx.font = "bold ".concat(Math.floor(12 * scale), "px Orbitron, sans-serif");
         ctx.fillStyle = '#00ffff';
         ctx.textAlign = 'right';
-        ctx.fillText("🛡️ ".concat(immuneTimeLeft.toFixed(1), "s"), hpBarX + hpBarWidth + 90, hpBarY + 14);
+        ctx.fillText("🛡️ ".concat(immuneTimeLeft.toFixed(1), "s"), hpBarX + hpBarWidth + 70 * scale, hpBarY + 12 * scale);
     }
     // Weapon timer (if secondary weapon active)
     if (secondaryWeapon) {
         const timeLeft = Math.max(0, secondaryWeaponEndTime - Date.now());
-        ctx.font = 'bold 11px Orbitron, sans-serif';
+        ctx.font = "bold ".concat(Math.floor(10 * scale), "px Orbitron, sans-serif");
         ctx.fillStyle = '#00ddff';
         ctx.textAlign = 'center';
-        ctx.fillText("⚡ ".concat((timeLeft / 1000).toFixed(1), "s"), canvas.width / 2, hpBarY + 38);
+        ctx.fillText("⚡ ".concat((timeLeft / 1000).toFixed(1), "s"), canvas.width / 2, hpBarY + 30 * scale);
     }
     // ===== TOP RIGHT: STATS =====
+    const statsX = canvas.width - 15 * scale;
     ctx.textAlign = 'right';
-    ctx.font = '15px Orbitron, sans-serif';
+    ctx.font = "".concat(Math.floor(13 * scale), "px Orbitron, sans-serif");
     ctx.fillStyle = '#ffcc00';
-    ctx.fillText("🏆 ".concat(gameStats.score), canvas.width - 20, 38);
+    ctx.fillText("🏆 ".concat(gameStats.score), statsX, 32 * scale);
     // Boss status indicator
     if (bossRocket) {
         ctx.fillStyle = '#ff4444';
         const bossHpPercent = Math.round(bossRocket.hp / bossRocket.maxHp * 100);
-        ctx.fillText("👹 BOSS: ".concat(bossHpPercent, "%"), canvas.width - 20, 60);
+        ctx.fillText("👹 ".concat(bossHpPercent, "%"), statsX, 50 * scale);
     } else if (!bossSpawned) {
-        const BOSS_SPAWN_TIME = 15000;
+        const BOSS_SPAWN_TIME = 9000;
         const timeUntilBoss = Math.max(0, Math.ceil((BOSS_SPAWN_TIME - elapsed) / 1000));
         ctx.fillStyle = '#ffaa00';
-        ctx.fillText("👹 BOSS IN: ".concat(timeUntilBoss, "s"), canvas.width - 20, 60);
+        ctx.fillText("👹 ".concat(timeUntilBoss, "s"), statsX, 50 * scale);
     } else {
         ctx.fillStyle = '#00ff88';
-        ctx.fillText("👹 BOSS DESTROYED!", canvas.width - 20, 60);
+        ctx.fillText("👹 ✓", statsX, 50 * scale);
     }
     ctx.fillStyle = '#ff6666';
-    ctx.fillText("🚀 ".concat(enemyRockets.length), canvas.width - 20, 82);
+    ctx.fillText("🚀 ".concat(enemyRockets.length), statsX, 68 * scale);
     // ===== PHASE INDICATOR =====
     ctx.textAlign = 'center';
-    ctx.font = 'bold 16px Orbitron, sans-serif';
+    ctx.font = "bold ".concat(Math.floor(16 * scale), "px Orbitron, sans-serif");
+    const phaseY = isMobile ? 50 : 65;
     if (isInDodgePhase) {
         const remaining = Math.ceil((DODGE_PHASE_DURATION - elapsed) / 1000);
         ctx.fillStyle = '#ff6b6b';
-        ctx.fillText("🔴 SPREAD + ⏱️ ".concat(remaining, "s"), canvas.width / 2, 65);
+        ctx.fillText("🔴 SPREAD + ⏱️ ".concat(remaining, "s"), canvas.width / 2, phaseY);
     } else if (!secondaryWeapon) {
         ctx.fillStyle = '#00ff88';
-        ctx.fillText('🔴 SPREAD | 🎯 CATCH POWER-UP!', canvas.width / 2, 65);
+        ctx.fillText(isMobile ? '🎯 CATCH POWER-UP!' : '🔴 SPREAD | 🎯 CATCH POWER-UP!', canvas.width / 2, phaseY);
     } else {
         // Dual weapon display
         const secondaryNames = {
@@ -1634,13 +1701,14 @@ function drawUI(isInDodgePhase, elapsed) {
             'magnetic': '🟣 MAGNET'
         };
         ctx.fillStyle = '#00ffaa';
-        ctx.fillText("🔴 SPREAD + ".concat(secondaryNames[secondaryWeapon], " (DUAL!)"), canvas.width / 2, 65);
+        ctx.fillText(isMobile ? "".concat(secondaryNames[secondaryWeapon], " DUAL!") : "🔴 SPREAD + ".concat(secondaryNames[secondaryWeapon], " (DUAL!)"), canvas.width / 2, phaseY);
     }
-    // ===== BOTTOM: CONTROLS =====
+    // ===== BOTTOM: CONTROLS (mobile-friendly) =====
     ctx.textAlign = 'center';
-    ctx.font = '13px Space Mono, monospace';
+    ctx.font = "".concat(Math.floor(11 * scale), "px Space Mono, monospace");
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.fillText('MOVE: Mouse/WASD  |  ATTACK: Click/Space', canvas.width / 2, canvas.height - 18);
+    const controlsText = isMobile ? '👆 TAP & DRAG TO MOVE' : 'MOVE: Mouse/WASD  |  ATTACK: Auto-fire';
+    ctx.fillText(controlsText, canvas.width / 2, canvas.height - 12 * scale);
 }
 // ============ BOSS ROCKET (HARD DIFFICULTY) ============
 function spawnBossRocket() {
@@ -1651,8 +1719,8 @@ function spawnBossRocket() {
         width: 250,
         height: 180,
         speed: 1,
-        hp: 10000,
-        maxHp: 10000,
+        hp: 5000,
+        maxHp: 5000,
         lastFireTime: 0,
         // 4 turret positions (2 left, 2 right)
         turrets: [
@@ -1672,7 +1740,13 @@ function spawnBossRocket() {
                 offsetX: 100,
                 offsetY: 50
             } // Far right
-        ]
+        ],
+        phase: 1,
+        minions: [],
+        laserTimer: 0,
+        isLaserFiring: false,
+        laserWarning: false,
+        invulnerable: false
     };
 }
 function updateBossRocket(now) {
@@ -1680,12 +1754,16 @@ function updateBossRocket(now) {
     // Move boss slowly down, stop at 1/3 from top
     const targetY = canvas.height * 0.25;
     const bossInPosition = bossRocket.y >= targetY;
+    // Phase 3: Bobbing + Faster Side Movement
+    const bobAmount = bossRocket.phase === 3 ? Math.sin(now / 300) * 5 : 0;
     if (bossRocket.y < targetY) {
         bossRocket.y += bossRocket.speed;
     } else {
-        // After stopping, follow player's horizontal position (left/right only)
+        bossRocket.y = targetY + bobAmount;
+        // After stopping, follow player's horizontal position
         const playerCenterX = player.x + player.width / 2;
-        const bossFollowSpeed = 3; // Speed for horizontal following
+        // Phase 2: Slower movement (tanky), Phase 3: Faster
+        const bossFollowSpeed = bossRocket.phase === 3 ? 8 : bossRocket.phase === 2 ? 1 : 3;
         if (Math.abs(bossRocket.x - playerCenterX) > 5) {
             if (bossRocket.x < playerCenterX) {
                 bossRocket.x += bossFollowSpeed;
@@ -1694,23 +1772,143 @@ function updateBossRocket(now) {
             }
         }
     }
-    // BOSS BARRIER: When boss is in position, restrict player movement
+    // PHASE TRANSITIONS
+    const hpPercent = bossRocket.hp / bossRocket.maxHp;
+    // Enter Phase 2 (Minions) at 66% HP
+    if (bossRocket.phase === 1 && hpPercent < 0.66) {
+        bossRocket.phase = 2;
+        bossRocket.invulnerable = true;
+        // Spawn 2 Minions
+        bossRocket.phase = 2;
+        bossRocket.invulnerable = true;
+        // Spawn 2 Minions - START ABOVE SCREEN
+        bossRocket.minions = [
+            {
+                x: bossRocket.x - 180,
+                y: -100,
+                width: 60,
+                height: 60,
+                hp: 400,
+                maxHp: 400,
+                offsetX: -180,
+                offsetY: 80,
+                lastFireTime: 0,
+                state: 'entering'
+            },
+            {
+                x: bossRocket.x + 180,
+                y: -100,
+                width: 60,
+                height: 60,
+                hp: 400,
+                maxHp: 400,
+                offsetX: 180,
+                offsetY: 80,
+                lastFireTime: 0,
+                state: 'entering'
+            }
+        ];
+        audioManager.playSoundEffect('powerup');
+        triggerScreenShake(5, 500);
+    } else if (bossRocket.phase === 2 && bossRocket.minions.length === 0 && hpPercent < 0.33) {
+        bossRocket.phase = 3;
+        bossRocket.laserTimer = 0;
+        audioManager.playSoundEffect('explosion'); // Rage sound
+        triggerScreenShake(10, 1000); // Big shake transition
+    }
+    // UPDATE MINIONS (Phase 2)
+    if (bossRocket.phase === 2 && bossRocket.minions.length > 0) {
+        bossRocket.invulnerable = true;
+        for (const minion of bossRocket.minions){
+            const targetX = bossRocket.x + minion.offsetX;
+            const targetY = bossRocket.y + minion.offsetY;
+            if (minion.state === 'entering') {
+                // Fly in from top
+                minion.x += (targetX - minion.x) * 0.1;
+                minion.y += (targetY - minion.y) * 0.1;
+                // Switch to locked if close
+                if (Math.abs(minion.y - targetY) < 5) {
+                    minion.state = 'locked';
+                }
+            } else {
+                // Locked to boss position
+                minion.x = targetX;
+                minion.y = targetY;
+            }
+            // Minion shoots every 2s
+            if (now - minion.lastFireTime > 2000) {
+                const dx = player.x - minion.x;
+                const dy = player.y - minion.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > 0) {
+                    enemyBullets.push({
+                        id: bulletIdCounter++,
+                        x: minion.x,
+                        y: minion.y,
+                        z: 1,
+                        width: 10,
+                        height: 20,
+                        speed: 6,
+                        damage: 1,
+                        color: '#ff4444',
+                        type: 'spread',
+                        isEnemy: true,
+                        dirX: dx / dist,
+                        dirY: dy / dist
+                    });
+                }
+                minion.lastFireTime = now;
+            }
+        }
+    }
+    // PHASE 3 ATTACKS (Laser)
+    if (bossRocket.phase === 3) {
+        bossRocket.laserTimer += 16; // Approx delta time
+        // Fast Laser Cycle (Exactly 2s): 0-0.5s Idle -> 0.5s-1s Warning -> 1s-2s Fire -> Reset
+        if (bossRocket.laserTimer > 500 && bossRocket.laserTimer < 1000) {
+            bossRocket.laserWarning = true;
+        } else {
+            bossRocket.laserWarning = false;
+        }
+        if (bossRocket.laserTimer > 1000) {
+            bossRocket.isLaserFiring = true;
+            // Laser Damage (Rect collision)
+            const laserWidth = 500; // MAXIMUM LASER
+            if (Math.abs(player.x - bossRocket.x) < laserWidth / 2 + player.width / 2) {
+                applyDamage(1); // Rapid damage
+                triggerScreenShake(2, 50);
+            }
+        } else {
+            bossRocket.isLaserFiring = false;
+        }
+        if (bossRocket.laserTimer > 2000) {
+            bossRocket.laserTimer = 0; // Loop (2s cycle)
+        }
+    }
+    // BOSS BARRIER logic (existing)
     if (bossInPosition) {
         // Define barrier zone - player cannot go above this line
-        const barrierY = bossRocket.y + bossRocket.height / 2 + 80; // Barrier below boss
-        // Restrict player from going above barrier
+        const barrierY = bossRocket.y + bossRocket.height / 2 + 80;
         if (player.y < barrierY) {
             player.y = barrierY;
         }
-        // Draw transparent barrier effect
         drawBossBarrier(barrierY);
     }
-    // Fire rapidly from 4 turrets every 150ms (fast burst)
-    if (now - bossRocket.lastFireTime >= 150) {
-        for (const turret of bossRocket.turrets){
-            spawnBossBullet(bossRocket.x + turret.offsetX, bossRocket.y + turret.offsetY);
+    // STANDARD FIRE (Disabled while laser firing)
+    if (!bossRocket.isLaserFiring) {
+        // Fire rapidly from turrets
+        // Phase 1: 200ms, Phase 2: 150ms, Phase 3: 100ms
+        const fireRate = bossRocket.phase === 3 ? 100 : bossRocket.phase === 2 ? 150 : 200;
+        if (now - bossRocket.lastFireTime >= fireRate) {
+            // In Phase 2, shoot fewer bullets from main body UNLESS minions are dead
+            // In Phase 3, standard fire is DISABLED (only laser)
+            if (bossRocket.phase !== 3 && (bossRocket.phase !== 2 || bossRocket.minions.length === 0)) {
+                for (const turret of bossRocket.turrets){
+                    spawnBossBullet(bossRocket.x + turret.offsetX, bossRocket.y + turret.offsetY);
+                }
+            }
+            bossRocket.lastFireTime = now;
         }
-        bossRocket.lastFireTime = now;
     }
     drawBossRocket();
 }
@@ -1739,17 +1937,142 @@ function spawnBossBullet(x, y) {
     });
 }
 function drawBossRocket() {
-    if (!bossRocket || !ctx) return;
+    if (!bossRocket || !ctx || !canvas) return;
     ctx.save();
     // Red glow for boss
     ctx.shadowBlur = 30;
     ctx.shadowColor = '#ff0044';
+    // DRAW LASER (BEHIND BOSS) - Visual Layer 1
+    if (bossRocket.phase === 3 && bossRocket.isLaserFiring) {
+        if (laserBeamImage && laserBeamImage.complete) {
+            // Rotate 90 degrees clockwise so the laser points straight down
+            ctx.save();
+            // Start laser from CENTER of boss (y) to hide the top edge behind the body
+            ctx.translate(bossRocket.x, bossRocket.y);
+            ctx.rotate(Math.PI / 2); // Rotate 90 degrees clockwise
+            // Draw laser: width becomes height, height becomes width (500px wide beam)
+            const laserLength = canvas.height - bossRocket.y;
+            const laserWidth = 500; // Maximum laser beam
+            ctx.drawImage(laserBeamImage, 0, -laserWidth / 2, laserLength, laserWidth);
+            ctx.restore();
+        } else {
+            // Fallback
+            ctx.fillStyle = '#ff0044';
+            ctx.shadowBlur = 50;
+            ctx.shadowColor = '#ff0000';
+            ctx.fillRect(bossRocket.x - 30, bossRocket.y + 50, 60, canvas.height);
+        }
+    }
     if (bossRocketImage && bossRocketImage.complete) {
         ctx.drawImage(bossRocketImage, bossRocket.x - bossRocket.width / 2, bossRocket.y - bossRocket.height / 2, bossRocket.width, bossRocket.height);
     } else {
         // Fallback shape
         ctx.fillStyle = '#663399';
         ctx.fillRect(bossRocket.x - bossRocket.width / 2, bossRocket.y - bossRocket.height / 2, bossRocket.width, bossRocket.height);
+    }
+    // Draw Minions (Phase 2)
+    if (bossRocket.phase === 2) {
+        for (const minion of bossRocket.minions){
+            // Draw minion (No connection line)
+            if (enemyRocketImage && enemyRocketImage.complete) {
+                ctx.drawImage(enemyRocketImage, minion.x - minion.width / 2, minion.y - minion.height / 2, minion.width, minion.height);
+            } else {
+                ctx.fillStyle = '#aa3333';
+                ctx.fillRect(minion.x - minion.width / 2, minion.y - minion.height / 2, minion.width, minion.height);
+            }
+            // Minion HP
+            ctx.fillStyle = '#00ff00';
+            ctx.fillRect(minion.x - 20, minion.y - 40, 40 * (minion.hp / minion.maxHp), 5);
+        }
+    }
+    // Draw Laser Effects (ON TOP OF BOSS) - Visual Layer 3
+    if (bossRocket.phase === 3) {
+        if (bossRocket.laserWarning) {
+            // Warning Line
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(bossRocket.x, bossRocket.y + 50);
+            ctx.lineTo(bossRocket.x, canvas.height);
+            ctx.stroke();
+        }
+        if (bossRocket.isLaserFiring) {
+            // EMITTER GLOW (Energy Source)
+            // Draws a bright ball of energy at the firing point to blend the laser with the ship
+            const gradient = ctx.createRadialGradient(bossRocket.x, bossRocket.y + 20, 10, bossRocket.x, bossRocket.y + 20, 80);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)'); // Core white
+            gradient.addColorStop(0.4, 'rgba(255, 50, 50, 0.9)'); // Inner red
+            gradient.addColorStop(1, 'rgba(255, 0, 0, 0)'); // Fade out
+            ctx.save();
+            ctx.fillStyle = gradient;
+            ctx.globalCompositeOperation = 'lighter'; // Additive blending for glow
+            ctx.beginPath();
+            ctx.arc(bossRocket.x, bossRocket.y + 20, 80, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+    // Immunity Shield (Phase 2) - Animated Cyan Comet Shield (Particle Trail Method)
+    if (bossRocket.invulnerable && bossRocket.phase === 2) {
+        const time = Date.now() / 200; // Animation speed
+        const radius = bossRocket.width / 2 + 25; // Smaller (tighter fit)
+        ctx.save();
+        ctx.translate(bossRocket.x, bossRocket.y);
+        // 1. Dotted Ring Background (Faint Cyan)
+        ctx.strokeStyle = 'rgba(0, 212, 255, 0.2)'; // Cyan
+        ctx.lineWidth = 2;
+        ctx.setLineDash([
+            8,
+            12
+        ]); // Dots
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]); // Reset
+        // 2. Rotating Comet Arcs (Solid Particle Trail)
+        // Draw 3 shields
+        for(let i = 0; i < 3; i++){
+            const angleOffset = i * (Math.PI * 2 / 3);
+            const currentAngle = time + angleOffset;
+            // DRAW TAIL (Series of overlapping circles decreasing in size)
+            const tailLength = Math.PI * 0.7; // Slightly shorter to fit 3
+            const segments = 40; // High count for smoothness
+            for(let j = 0; j < segments; j++){
+                const ratio = j / segments; // 0 (near head) to 1 (tail end)
+                // Calculate position along arc (behind head)
+                const angle = currentAngle - ratio * tailLength;
+                const x = Math.cos(angle) * radius;
+                const y = Math.sin(angle) * radius;
+                // Tapering Size and Opacity
+                const size = 6 * (1 - ratio); // Reduced from 10 to 6 for finer look
+                const alpha = (1 - ratio) * 0.8; // Start opaque, fade out
+                // Core Color (White-Cyan gradient illusion)
+                // R: 50->100, G: 255->255 (keep high for cyan mix), B: 255 (full blue)
+                ctx.fillStyle = "rgba(".concat(50 + ratio * 50, ", ").concat(212 + ratio * 40, ", 255, ").concat(alpha, ")");
+                ctx.shadowBlur = 10 * (1 - ratio);
+                ctx.shadowColor = '#00d4ff'; // Cyan Glow
+                ctx.beginPath();
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            // DRAW HEAD (Bright glowing orb)
+            const headX = Math.cos(currentAngle) * radius;
+            const headY = Math.sin(currentAngle) * radius;
+            // Bright Outer Glow
+            ctx.shadowBlur = 25;
+            ctx.shadowColor = '#00d4ff';
+            ctx.fillStyle = '#ccffff'; // Cyan-ish white
+            ctx.beginPath();
+            ctx.arc(headX, headY, 8, 0, Math.PI * 2); // Reduced from 12 to 8
+            ctx.fill();
+            // Solid White Core
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(headX, headY, 4, 0, Math.PI * 2); // Reduced from 7 to 4
+            ctx.fill();
+        }
+        ctx.restore();
     }
     // HP bar for boss
     const barWidth = bossRocket.width * 0.8;
@@ -1942,30 +2265,131 @@ function spawnEnemyRocket() {
         // @ts-ignore - adding custom properties for directional movement
         speedX: speedX,
         speedY: speedY,
-        direction: direction
+        direction: direction,
+        type: 'basic',
+        state: 'moving',
+        stateTimer: 0,
+        angle: 0
     });
+    // Randomly upgrade to special types (20% chance each)
+    const enemy = enemyRockets[enemyRockets.length - 1];
+    const rand = Math.random();
+    if (rand < 0.2) {
+        // Sniper: Spawn Top, Move Down -> Stop -> Shoot -> Retreat
+        enemy.type = 'sniper';
+        enemy.hp = 80;
+        enemy.maxHp = 80;
+        enemy.speed = 3;
+        enemy.x = Math.random() * (canvas.width - 100) + 50; // Random X within bounds
+        enemy.y = -60;
+        enemy.targetY = canvas.height * 0.15 + Math.random() * canvas.height * 0.2; // Stop point
+        enemy.state = 'moving';
+    } else if (rand < 0.4) {
+        // Spinner: V-Shape Movement (Obstacle)
+        enemy.type = 'spinner';
+        enemy.hp = 70;
+        enemy.maxHp = 70;
+        enemy.speed = 0; // Not used directly, using speedX/Y
+        // Spawn from Left, Right, or Top
+        const spawnSide = Math.random();
+        if (spawnSide < 0.33) {
+            // Left
+            enemy.x = -60;
+            enemy.y = Math.random() * 200;
+            enemy.speedX = 3 + Math.random() * 2; // Move Right
+            enemy.speedY = 2 + Math.random() * 2; // Move Down
+        } else if (spawnSide < 0.66) {
+            // Right
+            enemy.x = canvas.width + 60;
+            enemy.y = Math.random() * 200;
+            enemy.speedX = -(3 + Math.random() * 2); // Move Left
+            enemy.speedY = 2 + Math.random() * 2; // Move Down
+        } else {
+            // Top
+            enemy.x = Math.random() * canvas.width;
+            enemy.y = -60;
+            enemy.speedX = (Math.random() - 0.5) * 4; // Random X
+            enemy.speedY = 3 + Math.random() * 2; // Move Down Fast
+        }
+    }
     enemiesSpawned++;
 }
 function updateEnemyRockets(now) {
     if (!ctx || !canvas || !player) return;
     for(let i = enemyRockets.length - 1; i >= 0; i--){
         const enemy = enemyRockets[i];
-        // Enemy rockets CHASE the player
         const dx = player.x - enemy.x;
         const dy = player.y - enemy.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        const chaseSpeed = 2.5;
-        if (dist > 0) {
-            enemy.x += dx / dist * chaseSpeed;
-            enemy.y += dy / dist * chaseSpeed;
+        // BEHAVIOR BY TYPE
+        if (enemy.type === 'sniper') {
+            // Sniper: Move -> Stop -> Aim -> Shoot -> Retreat
+            if (enemy.state === 'moving') {
+                // Move down to target Y
+                if (enemy.y < (enemy.targetY || 200)) {
+                    enemy.y += enemy.speed;
+                } else {
+                    enemy.state = 'aiming';
+                    enemy.stateTimer = now + 1000; // Aim for 1s
+                }
+            } else if (enemy.state === 'aiming') {
+                // Track player visually (rotation) but don't move
+                if (now > enemy.stateTimer) {
+                    // Shoot PRECISE shot
+                    spawnEnemyBulletStraight(enemy, dx, dy, dist);
+                    // Go to Cooldown, not retreat. Stay until killed.
+                    enemy.state = 'cooldown';
+                    enemy.stateTimer = now + 1500; // Wait 1.5s before aiming again
+                }
+            } else if (enemy.state === 'cooldown') {
+                // Just wait
+                if (now > enemy.stateTimer) {
+                    enemy.state = 'aiming';
+                    enemy.stateTimer = now + 1000; // Aim again
+                }
+            }
+        } else if (enemy.type === 'spinner') {
+            // Spinner: V-Shape Bounce (No Shooting, No Spiral)
+            // Move
+            enemy.x += enemy.speedX || 0;
+            enemy.y += enemy.speedY || 0;
+            // Fixed rotation (no spinning) to emphasize it's not a spiral
+            // Point down or in direction of movement?
+            // Let's point in direction of movement
+            enemy.angle = Math.atan2(enemy.speedY || 0, enemy.speedX || 0) + Math.PI / 2;
+            // Bounce Logic (V-Shape)
+            // If hits bottom bound, bounce Y up
+            if (enemy.speedY > 0 && enemy.y > canvas.height * 0.75) {
+                enemy.speedY = -enemy.speedY; // Bounce up
+            }
+            // Remove if off screen
+            if (enemy.y < -100 && (enemy.speedY || 0) < 0) {
+                enemy.hp = 0; // Exited top
+            }
+            if ((enemy.x < -100 || enemy.x > canvas.width + 100) && enemy.y > 0) {
+                enemy.hp = 0; // Exited side
+            }
+        } else {
+            // Basic: Chase player (existing logic)
+            const chaseSpeed = 2.5;
+            if (dist > 0) {
+                enemy.x += dx / dist * chaseSpeed;
+                enemy.y += dy / dist * chaseSpeed;
+            }
+            // Shoot at player
+            if (now - enemy.lastFireTime > 1500) {
+                spawnEnemyBulletStraight(enemy, dx, dy, dist);
+                enemy.lastFireTime = now;
+            }
         }
-        // Enemy shoots at player (straight bullets based on current direction)
-        if (now - enemy.lastFireTime > 1500) {
-            spawnEnemyBulletStraight(enemy, dx, dy, dist);
-            enemy.lastFireTime = now;
+        // Calculate rotation
+        let angle = Math.PI; // Face down default
+        if (enemy.type === 'basic' || enemy.type === 'sniper' && (enemy.state === 'aiming' || enemy.state === 'cooldown')) {
+            // Face player
+            angle = Math.atan2(dy, dx) + Math.PI / 2;
+        } else if (enemy.type === 'spinner') {
+            angle = enemy.angle;
         }
-        // Calculate rotation to face movement direction (chasing player)
-        const angle = Math.atan2(dy, dx) + Math.PI / 2;
         drawEnemyRocketAtPosition(enemy, angle);
         // Remove if reached player area or off screen for too long
         if (enemy.x < -150 || enemy.x > canvas.width + 150 || enemy.y < -150 || enemy.y > canvas.height + 150) {
@@ -1980,11 +2404,16 @@ function drawEnemyRocketAtPosition(enemy, angle) {
     ctx.save();
     ctx.translate(enemy.x, enemy.y);
     ctx.rotate(angle);
+    // Select sprite based on type
+    let img = enemyRocketImage;
+    if (enemy.type === 'sniper' && enemySniperImage) img = enemySniperImage;
+    if (enemy.type === 'spinner' && enemySpinnerImage) img = enemySpinnerImage;
     // Draw enemy rocket image if loaded
-    if (enemyRocketImage && enemyRocketImage.complete) {
+    if (img && img.complete) {
         ctx.shadowBlur = 15;
-        ctx.shadowColor = '#ff0000';
-        ctx.drawImage(enemyRocketImage, -w / 2, -h / 2, w, h);
+        // Different shadow color for difference types
+        ctx.shadowColor = enemy.type === 'spinner' ? '#00ff00' : enemy.type === 'sniper' ? '#ff8800' : '#ff0000';
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
     } else {
         // Fallback to canvas drawing
         ctx.shadowBlur = 15;
@@ -2108,30 +2537,41 @@ function drawEnemyRocket(enemy, pos) {
     const h = enemy.height * pos.scale;
     ctx.save();
     ctx.translate(pos.x, pos.y);
-    ctx.rotate(Math.PI); // Face down
-    // Enemy rocket body
-    ctx.shadowBlur = 15;
-    ctx.shadowColor = '#ff0000';
-    ctx.fillStyle = '#cc2222';
-    ctx.beginPath();
-    ctx.moveTo(0, -h / 2);
-    ctx.lineTo(w / 3, h / 3);
-    ctx.lineTo(-w / 3, h / 3);
-    ctx.closePath();
-    ctx.fill();
-    // Cockpit
-    ctx.fillStyle = '#222222';
-    ctx.beginPath();
-    ctx.arc(0, 0, w / 5, 0, Math.PI * 2);
-    ctx.fill();
-    // Engine glow
-    ctx.fillStyle = 'rgba(255, 100, 50, 0.8)';
-    ctx.beginPath();
-    ctx.moveTo(-w / 5, h / 3);
-    ctx.lineTo(0, h / 2 + Math.random() * 5);
-    ctx.lineTo(w / 5, h / 3);
-    ctx.closePath();
-    ctx.fill();
+    ctx.rotate(enemy.angle || Math.PI); // Use passed angle
+    // Select sprite based on type
+    let img = enemyRocketImage;
+    if (enemy.type === 'sniper' && enemySniperImage) img = enemySniperImage;
+    if (enemy.type === 'spinner' && enemySpinnerImage) img = enemySpinnerImage;
+    if (img && img.complete) {
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = enemy.type === 'sniper' ? '#ff0000' : enemy.type === 'spinner' ? '#00ff00' : '#ff4444';
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    } else {
+        // Fallback drawing
+        // Body
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#ff0000';
+        ctx.fillStyle = '#cc2222';
+        ctx.beginPath();
+        ctx.moveTo(0, -h / 2);
+        ctx.lineTo(w / 3, h / 3);
+        ctx.lineTo(-w / 3, h / 3);
+        ctx.closePath();
+        ctx.fill();
+        // Cockpit
+        ctx.fillStyle = '#222222';
+        ctx.beginPath();
+        ctx.arc(0, 0, w / 5, 0, Math.PI * 2);
+        ctx.fill();
+        // Engine glow
+        ctx.fillStyle = 'rgba(255, 100, 50, 0.8)';
+        ctx.beginPath();
+        ctx.moveTo(-w / 5, h / 3);
+        ctx.lineTo(0, h / 2 + Math.random() * 5);
+        ctx.lineTo(w / 5, h / 3);
+        ctx.closePath();
+        ctx.fill();
+    }
     ctx.restore();
     // HP bar
     const barWidth = w * 0.8;
@@ -2264,7 +2704,6 @@ function equipWeapon(weaponType) {
         }
     };
     secondaryWeaponConfig = weaponConfigs[weaponType];
-    updateUI();
 }
 function drawPowerUp(powerUp, pos) {
     if (!ctx) return;
@@ -2274,22 +2713,29 @@ function drawPowerUp(powerUp, pos) {
     ctx.rotate(powerUp.rotation);
     ctx.shadowBlur = 20;
     ctx.shadowColor = powerUp.color;
-    ctx.fillStyle = powerUp.color;
-    ctx.beginPath();
-    ctx.moveTo(0, -22);
-    ctx.lineTo(22, 0);
-    ctx.lineTo(0, 22);
-    ctx.lineTo(-22, 0);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(0, -10);
-    ctx.lineTo(10, 0);
-    ctx.lineTo(0, 10);
-    ctx.lineTo(-10, 0);
-    ctx.closePath();
-    ctx.fill();
+    // Use specific image for weapon upgrades if available
+    if ((powerUp.weaponType === 'spread' || powerUp.weaponType === 'laser' || powerUp.weaponType === 'magnetic') && weaponPowerUpImage && weaponPowerUpImage.complete && weaponPowerUpImage.naturalWidth > 0) {
+        // Preserve aspect ratio to prevent "gepeng" (flattening)
+        const aspect = weaponPowerUpImage.naturalWidth / weaponPowerUpImage.naturalHeight;
+        const targetHeight = 100; // Increased size
+        const targetWidth = targetHeight * aspect;
+        ctx.drawImage(weaponPowerUpImage, -targetWidth / 2, -targetHeight / 2, targetWidth, targetHeight);
+    } else {
+        // Fallback or other powerups (like lives/shield if any)
+        ctx.fillStyle = powerUp.color;
+        ctx.beginPath();
+        ctx.moveTo(0, -22);
+        ctx.lineTo(22, 0);
+        ctx.lineTo(0, 22);
+        ctx.lineTo(-22, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Inner detail
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.fill();
+    }
     ctx.restore();
 }
 // ============ BULLET LOGIC - STRAIGHT UP ============
@@ -2317,6 +2763,7 @@ function fireBullets() {
         });
     }
     audioManager.playSoundEffect('spread');
+    muzzleFlashUntil = Date.now() + 50; // Trigger muzzle flash
     // If player has caught a secondary weapon, fire it too
     if (secondaryWeapon && secondaryWeaponConfig) {
         if (secondaryWeaponConfig.type === 'laser') {
@@ -2487,10 +2934,43 @@ function updateBullets() {
                 }
             }
         }
+        // Check collision with boss minions (Phase 2)
+        if (!bulletHit && bossRocket && bossRocket.phase === 2 && bossRocket.minions.length > 0) {
+            for(let m = bossRocket.minions.length - 1; m >= 0; m--){
+                const minion = bossRocket.minions[m];
+                const dist = Math.sqrt(Math.pow(bullet.x - minion.x, 2) + Math.pow(bullet.y - minion.y, 2));
+                if (dist < minion.width / 2) {
+                    minion.hp -= bullet.damage;
+                    gameStats.hits++;
+                    gameStats.score += 50;
+                    if (minion.hp <= 0) {
+                        spawnExplosion(minion.x, minion.y, 1.5);
+                        bossRocket.minions.splice(m, 1);
+                        audioManager.playSoundEffect('explosion');
+                        gameStats.score += 1000; // Bonus for killing minion
+                    }
+                    bulletHit = true;
+                    // Check if all minions dead -> Remove immunity
+                    if (bossRocket.minions.length === 0) {
+                        bossRocket.invulnerable = false;
+                        // Stay in Phase 2 but vulnerable. Phase 3 triggers at 33% HP in updateBossRocket.
+                        audioManager.playSoundEffect('powerup'); // Sound cue
+                    }
+                    break;
+                }
+            }
+        }
         // Check collision with boss rocket
         if (!bulletHit && bossRocket) {
             const dist = Math.sqrt(Math.pow(bullet.x - bossRocket.x, 2) + Math.pow(bullet.y - bossRocket.y, 2));
             if (dist < bossRocket.width * 0.4) {
+                // Immunity Check
+                if (bossRocket.invulnerable) {
+                    bulletHit = true;
+                    // Deflect logic/effect
+                    bullets.splice(i, 1);
+                    break;
+                }
                 bossRocket.hp -= bullet.damage;
                 gameStats.hits++;
                 if (hasWeapon) {
@@ -2518,6 +2998,17 @@ function updateBullets() {
 function drawBullet(bullet) {
     if (!ctx) return;
     ctx.save();
+    // Bullet Trail (Gradient)
+    const trailLength = 30;
+    const gradient = ctx.createLinearGradient(bullet.x, bullet.y, bullet.x, bullet.y + trailLength);
+    gradient.addColorStop(0, bullet.color);
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.strokeStyle = gradient;
+    ctx.lineWidth = bullet.width;
+    ctx.beginPath();
+    ctx.moveTo(bullet.x, bullet.y);
+    ctx.lineTo(bullet.x, bullet.y + trailLength);
+    ctx.stroke();
     ctx.shadowBlur = 20;
     ctx.shadowColor = bullet.color;
     // Larger bullet sizes (3x width, 2x height)
@@ -2556,6 +3047,15 @@ function drawBullet(bullet) {
 function drawPlayer() {
     if (!ctx || !player) return;
     ctx.save();
+    // Muzzle Flash
+    if (Date.now() < muzzleFlashUntil) {
+        ctx.fillStyle = 'rgba(255, 255, 200, 0.8)';
+        ctx.beginPath();
+        ctx.arc(player.x, player.y - 30, 25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = '#ffffff';
+    }
     // Flashing effect when immune
     if (isImmune) {
         const flashRate = Math.floor(Date.now() / 100) % 2;
