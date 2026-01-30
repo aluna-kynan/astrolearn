@@ -73,7 +73,7 @@ export function ClientLayout({ children }: ClientLayoutProps): React.JSX.Element
     // Hide cursor when mini-game is active
     useEffect(() => {
         if (customCursorRef.current) {
-            customCursorRef.current.style.display = pathname === '/game' ? 'none' : 'block';
+            customCursorRef.current.style.display = pathname === '/join/game' ? 'none' : 'block';
         }
     }, [pathname]);
 

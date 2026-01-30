@@ -63,10 +63,11 @@ interface EnemyRocket {
     hp: number;
     maxHp: number;
     laneX: number;
+    imageVariant?: number; // 0-3 for basic enemy variations
 
     lastFireTime: number;
     type: 'basic' | 'sniper' | 'spinner';
-    state: 'moving' | 'aiming' | 'shooting';
+    state: 'moving' | 'aiming' | 'shooting' | 'cooldown'; // Added 'cooldown' for sniper
     stateTimer: number; // For timing states
     angle: number;      // For spinner movement
     speedX?: number;    // Optional horizontal speed
@@ -74,6 +75,14 @@ interface EnemyRocket {
     direction?: string; // Optional direction for spawn logic
     targetX?: number;   // For sniper aiming
     targetY?: number;
+    enterTime?: number;
+    lastShotTime?: number;
+    pathType?: 'sine_left' | 'sine_right' | 'cross_left' | 'cross_right' | 'u_turn_left' | 'u_turn_right'; // Added formation types
+    initialX?: number;  // Starting X for sine wave calculation
+    startX?: number; // Kept for compatibility
+    timeOffset?: number; // Time offset for formation spacing
+    dirX?: number;
+    dirY?: number;
 }
 
 // Boss Rocket (for hard difficulty, appears in last 10 seconds)
@@ -106,6 +115,7 @@ interface BossRocket {
     isLaserFiring: boolean;
     laserWarning: boolean;
     invulnerable: boolean;
+    laserDamageTick?: number;
 }
 
 interface PowerUp {
@@ -162,10 +172,9 @@ let secondaryWeapon: WeaponType | null = null;
 let secondaryWeaponConfig: WeaponConfig | null = null;
 let secondaryWeaponEndTime: number = 0;
 
-// Background scrolling
-let backgroundImage: HTMLImageElement | null = null;
-let backgroundY1: number = 0;
-let backgroundY2: number = 0;
+// Background scrolling (3-image loop)
+let backgroundImages: HTMLImageElement[] = [];
+let bgPanelY: number[] = []; // Y positions for each panel
 let backgroundScrollSpeed: number = 4;
 
 // Booster decorations
@@ -181,6 +190,7 @@ let lastSmokeSpawnTime: number = 0;
 
 // Enemy rocket images
 let enemyRocketImage: HTMLImageElement | null = null;
+let enemyBasicImages: HTMLImageElement[] = []; // Array for basic enemy variants
 let enemySniperImage: HTMLImageElement | null = null;
 let enemySpinnerImage: HTMLImageElement | null = null;
 
@@ -206,6 +216,8 @@ let bossRocketImage: HTMLImageElement | null = null;
 let bossBulletImage: HTMLImageElement | null = null; // bullet_4_2_0.png
 let laserBeamImage: HTMLImageElement | null = null; // laser_6.png
 let weaponPowerUpImage: HTMLImageElement | null = null;
+let loveImage: HTMLImageElement | null = null;
+let barHpImage: HTMLImageElement | null = null;
 
 // Additional scrolling decorations
 let spaceStation1Image: HTMLImageElement | null = null;
@@ -245,7 +257,11 @@ let bossEscaped: boolean = false;
 let lastFireTime: number = 0;
 let lastSpawnTime: number = 0;
 let lastEnemySpawnTime: number = 0;
+let lastSquadronType: string = ''; // Track last squadron pattern
 let gameStartTime: number = 0;
+let showBossWarning: boolean = false;
+let bossWarningStartTime: number = 0;
+
 
 // Weapon settings
 const WEAPON_DURATION = 5000;
@@ -265,11 +281,15 @@ const MOVING_ASTEROID_COUNT = {
     medium: 15,
     hard: 25
 };
-const ENEMY_ROCKET_COUNT = {
-    easy: 3,
-    medium: 5,
-    hard: 9
+
+// ============ WAVE CONFIGURATION ============
+const WAVE_CONFIGS = {
+    easy: { spinner: 6, sniper: 2, basic: 0 },
+    medium: { basic: 9, sniper: 3, spinner: 3 },
+    hard: { basic: 15, sniper: 5, spinner: 5 }
 };
+
+let enemySpawnQueue: string[] = []; // Current wave queue
 
 // Stats
 let gameStats: GameStats = {
@@ -296,9 +316,16 @@ let mouseUpHandler: ((e: MouseEvent) => void) | null = null;
 
 // ============ AUDIO SYSTEM ============
 
+type SoundType = 'spread' | 'laserBiru' | 'laserMagnet' | 'bossLaser' | 'destroy' | 'powerup';
+
 class AudioManager {
     private audioContext: AudioContext | null = null;
     private isMuted: boolean = false;
+    private audioBuffers: Map<string, AudioBuffer> = new Map();
+    private activeSources: AudioBufferSourceNode[] = [];
+    private bgmSource: AudioBufferSourceNode | null = null;
+    private bgmGain: GainNode | null = null;
+    private isLoaded: boolean = false;
 
     constructor() {
         try {
@@ -308,66 +335,167 @@ class AudioManager {
         }
     }
 
-    playSoundEffect(type: 'spread' | 'laser' | 'magnetic' | 'hit' | 'powerup' | 'explosion'): void {
+    async loadSounds(): Promise<void> {
+        if (!this.audioContext || this.isLoaded) return;
+
+        const soundFiles: { [key: string]: string } = {
+            'spread': '/assets/spread.mp3',
+            'laserBiru': '/assets/laserbiru.mp3',
+            'laserMagnet': '/assets/lasermagnet.mp3',
+            'bossLaser': '/assets/big-laser-beam-94884.mp3',
+            'destroy': '/assets/hancur.mp3',
+            'bgm': '/assets/bs_game.mp3'
+        };
+
+        const loadPromises = Object.entries(soundFiles).map(async ([key, url]) => {
+            try {
+                const response = await fetch(url);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioBuffer = await this.audioContext!.decodeAudioData(arrayBuffer);
+                this.audioBuffers.set(key, audioBuffer);
+            } catch (e) {
+                console.log(`Failed to load sound: ${key}`, e);
+            }
+        });
+
+        await Promise.all(loadPromises);
+        this.isLoaded = true;
+        console.log('All sounds loaded');
+    }
+
+    playSound(type: SoundType, volume: number = 0.5): void {
         if (!this.audioContext || this.isMuted) return;
 
-        const now = this.audioContext.currentTime;
-        const osc = this.audioContext.createOscillator();
-        const gain = this.audioContext.createGain();
+        // Resume audio context if suspended (browser autoplay policy)
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
 
-        osc.connect(gain);
-        gain.connect(this.audioContext.destination);
+        let bufferKey = type as string;
+        let offset = 0;
+        let duration: number | undefined = undefined;
+        let playbackRate = 1.0;
 
-        switch (type) {
-            case 'spread':
-                osc.frequency.value = 400;
-                gain.gain.setValueAtTime(0.12, now);
-                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
-                osc.start(now);
-                osc.stop(now + 0.1);
-                break;
+        // Special handling for specific sounds
+        if (type === 'laserBiru') {
+            offset = 16; // Start at 16 seconds
+            duration = 2; // Play for 2 seconds (16-18)
+        } else if (type === 'bossLaser') {
+            playbackRate = 2.0; // 2x speed
+        }
 
-            case 'laser':
-                osc.frequency.setValueAtTime(800, now);
-                osc.frequency.exponentialRampToValueAtTime(200, now + 0.15);
-                gain.gain.setValueAtTime(0.12, now);
-                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
-                osc.start(now);
-                osc.stop(now + 0.15);
-                break;
+        const buffer = this.audioBuffers.get(bufferKey);
+        if (!buffer) return;
 
-            case 'magnetic':
-                osc.frequency.setValueAtTime(600, now);
-                gain.gain.setValueAtTime(0.12, now);
-                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
-                osc.start(now);
-                osc.stop(now + 0.08);
-                break;
+        const source = this.audioContext.createBufferSource();
+        const gainNode = this.audioContext.createGain();
 
-            case 'hit':
+        source.buffer = buffer;
+        source.playbackRate.value = playbackRate;
+        gainNode.gain.value = volume;
+
+        source.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
+
+        // Track active sources for cleanup
+        this.activeSources.push(source);
+        source.onended = () => {
+            const index = this.activeSources.indexOf(source);
+            if (index > -1) this.activeSources.splice(index, 1);
+        };
+
+        if (duration !== undefined) {
+            source.start(0, offset, duration);
+        } else {
+            source.start(0, offset);
+        }
+    }
+
+    startBGM(volume: number = 0.3): void {
+        if (!this.audioContext || this.isMuted || this.bgmSource) return;
+
+        const buffer = this.audioBuffers.get('bgm');
+        if (!buffer) return;
+
+        // Resume audio context if suspended
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
+
+        this.bgmSource = this.audioContext.createBufferSource();
+        this.bgmGain = this.audioContext.createGain();
+
+        this.bgmSource.buffer = buffer;
+        this.bgmSource.loop = true;
+        this.bgmGain.gain.value = volume;
+
+        this.bgmSource.connect(this.bgmGain);
+        this.bgmGain.connect(this.audioContext.destination);
+
+        this.bgmSource.start(0);
+    }
+
+    stopBGM(): void {
+        if (this.bgmSource) {
+            try {
+                this.bgmSource.stop();
+            } catch (e) {
+                // Already stopped
+            }
+            this.bgmSource = null;
+            this.bgmGain = null;
+        }
+    }
+
+    stopAllSounds(): void {
+        // Stop all active sound effects
+        this.activeSources.forEach(source => {
+            try {
+                source.stop();
+            } catch (e) {
+                // Already stopped
+            }
+        });
+        this.activeSources = [];
+
+        // Stop background music
+        this.stopBGM();
+    }
+
+    // Legacy method for compatibility (uses oscillator fallback)
+    playSoundEffect(type: 'spread' | 'laser' | 'magnetic' | 'hit' | 'powerup' | 'explosion'): void {
+        // Map legacy types to new sound system
+        if (type === 'spread') {
+            this.playSound('spread', 0.4);
+        } else if (type === 'laser') {
+            this.playSound('laserBiru', 0.5);
+        } else if (type === 'magnetic') {
+            this.playSound('laserMagnet', 0.5);
+        } else if (type === 'explosion') {
+            this.playSound('destroy', 0.6);
+        }
+        // hit and powerup use oscillator fallback
+        else if (this.audioContext) {
+            const now = this.audioContext.currentTime;
+            const osc = this.audioContext.createOscillator();
+            const gain = this.audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(this.audioContext.destination);
+
+            if (type === 'hit') {
                 osc.frequency.value = 150;
                 gain.gain.setValueAtTime(0.15, now);
                 gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
                 osc.start(now);
                 osc.stop(now + 0.2);
-                break;
-
-            case 'explosion':
-                osc.frequency.value = 80;
-                gain.gain.setValueAtTime(0.2, now);
-                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-                osc.start(now);
-                osc.stop(now + 0.3);
-                break;
-
-            case 'powerup':
+            } else if (type === 'powerup') {
                 osc.frequency.setValueAtTime(400, now);
                 osc.frequency.exponentialRampToValueAtTime(800, now + 0.2);
                 gain.gain.setValueAtTime(0.12, now);
                 gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
                 osc.start(now);
                 osc.stop(now + 0.3);
-                break;
+            }
         }
     }
 }
@@ -422,6 +550,25 @@ export function startMiniGame(
 
     // Get difficulty config
     difficultyConfig = difficultyConfigs[difficulty];
+
+    // Initialize Wave Queue based on difficulty (Generate & Shuffle)
+    const config = WAVE_CONFIGS[difficulty];
+    let queue: string[] = [];
+
+    // Fill queue
+    for (let i = 0; i < config.basic; i++) queue.push('basic');
+    for (let i = 0; i < config.sniper; i++) queue.push('sniper');
+    for (let i = 0; i < config.spinner; i++) queue.push('spinner');
+
+    // Shuffle queue (Fisher-Yates)
+    for (let i = queue.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
+
+    enemySpawnQueue = queue;
+    enemiesSpawned = 0;
+
 
     // Initialize spread as base weapon from the start
     currentWeapon = 'spread';
@@ -490,11 +637,20 @@ export function startMiniGame(
     meteorImage = new Image();
     meteorImage.src = '/assets/meteor.png';
 
-    // Load background image
-    backgroundImage = new Image();
-    backgroundImage.src = '/assets/bgbaru10.png';
-    backgroundY1 = 0;
-    backgroundY2 = -canvas.height;
+    // Load background images (3-image loop: 1 → 3 → 2)
+    backgroundImages = [];
+    const bgSources = [
+        '/assets/bgbarucuy.jpg',  // Image 1
+        '/assets/bgbarucuy3.jpg', // Image 3 (gap in middle)
+        '/assets/bgbarucuy2.jpg'  // Image 2 (dense)
+    ];
+    for (const src of bgSources) {
+        const img = new Image();
+        img.src = src;
+        backgroundImages.push(img);
+    }
+    // Initialize panel positions (stacked above each other)
+    bgPanelY = [0, -canvas.height, -canvas.height * 2];
 
     // Set difficulty-based scroll speed
     const scrollSpeeds = { easy: 3, medium: 5, hard: 7 };
@@ -509,10 +665,25 @@ export function startMiniGame(
     // Load enemy rocket images
     enemyRocketImage = new Image();
     enemyRocketImage.src = '/assets/roket_musuh.png';
+
+    // Load 4 variants for Basic Enemy
+    enemyBasicImages = [];
+    const basicSources = [
+        '/assets/var_enemy1.png',
+        '/assets/var_enemy2.png',
+        '/assets/var_enemy4.png',
+        '/assets/var_enemy5.png'
+    ];
+    for (const src of basicSources) {
+        const img = new Image();
+        img.src = src;
+        enemyBasicImages.push(img);
+    }
+
     enemySniperImage = new Image();
-    enemySniperImage.src = '/assets/main_7_1_1.png';
+    enemySniperImage.src = '/assets/sub_7_2.png'; // New Sniper Asset
     enemySpinnerImage = new Image();
-    enemySpinnerImage.src = '/assets/sub_7_2.png';
+    enemySpinnerImage.src = '/assets/enemy_small_w1_1.png'; // New Spinner (Squadron) Asset
 
     // Load explosion image
     explosionImage = new Image();
@@ -529,13 +700,17 @@ export function startMiniGame(
 
     // Load boss rocket image
     bossRocketImage = new Image();
-    bossRocketImage.src = '/assets/roket_bos.png';
+    bossRocketImage.src = '/assets/bos.png';
     bossBulletImage = new Image();
     bossBulletImage.src = '/assets/bullet_4_2_0.png';
     laserBeamImage = new Image();
     laserBeamImage.src = '/assets/laser_6.png';
     weaponPowerUpImage = new Image();
     weaponPowerUpImage.src = '/assets/upwewapon.png';
+    loveImage = new Image();
+    loveImage.src = '/assets/love.png';
+    barHpImage = new Image();
+    barHpImage.src = '/assets/bar_hp.png';
 
 
     // Load additional scrolling decoration images
@@ -555,8 +730,8 @@ export function startMiniGame(
     player = {
         x: canvas.width / 2,
         y: canvas.height - 100,
-        width: 70,
-        height: 70,
+        width: 90,
+        height: 90,
         speed: 10,
         image: spaceshipImg,
         dx: 0,
@@ -578,6 +753,11 @@ export function startMiniGame(
 
     // Setup controls
     setupControls();
+
+    // Load sounds and start BGM
+    audioManager.loadSounds().then(() => {
+        audioManager.startBGM(0.3);
+    });
 
     // Start game loop
     gameLoop = requestAnimationFrame(update);
@@ -710,7 +890,8 @@ function update(): void {
     updatePowerUps();
 
     // Firing - bullets go STRAIGHT UP
-    if (hasWeapon && weaponConfig && isFiring && now - lastFireTime >= weaponConfig.fireRate) {
+    // Can only fire if NOT immune
+    if (hasWeapon && weaponConfig && isFiring && !isImmune && now - lastFireTime >= weaponConfig.fireRate) {
         fireBullets();
         lastFireTime = now;
     }
@@ -722,20 +903,22 @@ function update(): void {
         lastSpawnTime = now;
     }
 
-    // Spawn enemy rockets (faster spawn rate)
-    const maxEnemies = ENEMY_ROCKET_COUNT[currentDifficulty];
-    if (enemiesSpawned < maxEnemies && now - lastEnemySpawnTime >= 600) {
+    // Spawn Enemy Wave
+    if (enemySpawnQueue.length > 0 && now - lastEnemySpawnTime >= 2000) { // 2s delay between spawns
         spawnEnemyRocket();
         lastEnemySpawnTime = now;
     }
 
-
-
-    // Spawn boss rocket after 9 seconds for ALL difficulties
-    const BOSS_SPAWN_TIME = 9000; // Boss appears after 9seconds
-    if (elapsed >= BOSS_SPAWN_TIME && !bossSpawned && !bossRocket) {
-        spawnBossRocket();
-        bossSpawned = true;
+    // Spawn Boss when Wave is Cleared
+    if (enemySpawnQueue.length === 0 && enemyRockets.length === 0 && !bossSpawned && !bossRocket) {
+        if (!showBossWarning) {
+            showBossWarning = true;
+            bossWarningStartTime = now;
+        } else if (now - bossWarningStartTime > 3000) {
+            spawnBossRocket();
+            bossSpawned = true;
+            showBossWarning = false;
+        }
     }
 
     // Update boss rocket if present
@@ -1014,25 +1197,30 @@ function updateSmokeParticles(): void {
 function drawBackground(): void {
     if (!ctx || !canvas) return;
 
-    // Scroll background
-    backgroundY1 += backgroundScrollSpeed;
-    backgroundY2 += backgroundScrollSpeed;
+    const totalHeight = canvas.height * 3; // Total height of all 3 panels
 
-    // Reset positions for seamless loop
-    if (backgroundY1 >= canvas.height) {
-        backgroundY1 = backgroundY2 - canvas.height;
-    }
-    if (backgroundY2 >= canvas.height) {
-        backgroundY2 = backgroundY1 - canvas.height;
+    // Scroll all panels
+    for (let i = 0; i < bgPanelY.length; i++) {
+        bgPanelY[i] += backgroundScrollSpeed;
+
+        // Reset panel to top when it goes off screen bottom
+        if (bgPanelY[i] >= canvas.height) {
+            // Find the topmost panel and place this one above it
+            const minY = Math.min(...bgPanelY);
+            bgPanelY[i] = minY - canvas.height;
+        }
     }
 
-    // Draw scrolling background image with pixel-perfect positioning
-    if (backgroundImage && backgroundImage.complete) {
-        // Use Math.floor to prevent sub-pixel gaps
-        ctx.drawImage(backgroundImage, 0, Math.floor(backgroundY1), canvas.width, canvas.height);
-        ctx.drawImage(backgroundImage, 0, Math.floor(backgroundY2), canvas.width, canvas.height);
-    } else {
-        // Fallback gradient
+    // Draw all panels
+    for (let i = 0; i < backgroundImages.length; i++) {
+        const img = backgroundImages[i];
+        if (img && img.complete) {
+            ctx.drawImage(img, 0, Math.floor(bgPanelY[i]), canvas.width, canvas.height);
+        }
+    }
+
+    // Fallback if images not loaded
+    if (!backgroundImages[0]?.complete) {
         const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
         gradient.addColorStop(0, '#0a0015');
         gradient.addColorStop(0.3, '#1a0030');
@@ -1168,70 +1356,66 @@ function drawUI(isInDodgePhase: boolean, elapsed: number): void {
     const isMobile = canvas.width < 768;
     const scale = isMobile ? 0.7 : 1;
 
-    // ===== TOP CENTER: LIVES & HP BAR =====
-    const hpBarWidth = 200 * scale;
-    const hpBarHeight = 18 * scale;
-    const hpBarX = (canvas.width - hpBarWidth) / 2;
-    const hpBarY = 12 * scale;
+    // ===== TOP LEFT: SIMPLE HP BAR (Reference Design) =====
+    const barX = 15 * scale;
+    const barY = 15 * scale;
+    const barWidth = 180 * scale;
+    const barHeight = 22 * scale;
+    const borderRadius = 4 * scale;
 
-    // Background panel
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    // Draw bar background (dark with border)
+    ctx.fillStyle = 'rgba(0, 30, 50, 0.9)';
+    ctx.strokeStyle = '#4ab8c7';
+    ctx.lineWidth = 2 * scale;
+
+    // Rounded rectangle for background
     ctx.beginPath();
-    ctx.roundRect(hpBarX - 80 * scale, hpBarY - 4 * scale, hpBarWidth + 160 * scale, hpBarHeight + 12 * scale, 8);
+    ctx.roundRect(barX, barY, barWidth, barHeight, borderRadius);
     ctx.fill();
+    ctx.stroke();
 
-    // Draw lives (hearts)
-    ctx.font = `${Math.floor(16 * scale)}px Arial`;
-    ctx.textAlign = 'left';
-    const heartSpacing = 22 * scale;
-    for (let i = 0; i < PLAYER_MAX_LIVES; i++) {
-        if (i < playerLives) {
-            ctx.fillStyle = '#ff4466';
-            ctx.fillText('❤️', hpBarX - 70 * scale + i * heartSpacing, hpBarY + 14 * scale);
-        } else {
-            ctx.fillStyle = 'rgba(255, 68, 102, 0.3)';
-            ctx.fillText('🖤', hpBarX - 70 * scale + i * heartSpacing, hpBarY + 14 * scale);
-        }
+    // Draw HP fill (solid cyan gradient)
+    const hpPercent = playerLifeHP / LIFE_MAX_HP;
+    const fillWidth = (barWidth - 4 * scale) * hpPercent;
+
+    if (fillWidth > 0) {
+        const gradient = ctx.createLinearGradient(barX, barY, barX, barY + barHeight);
+        gradient.addColorStop(0, '#5ed4e6');
+        gradient.addColorStop(0.5, '#46a7bb');
+        gradient.addColorStop(1, '#2d7a8c');
+        ctx.fillStyle = gradient;
+
+        ctx.beginPath();
+        ctx.roundRect(barX + 2 * scale, barY + 2 * scale, fillWidth, barHeight - 4 * scale, borderRadius - 1);
+        ctx.fill();
     }
 
-    // HP bar empty
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-    ctx.beginPath();
-    ctx.roundRect(hpBarX, hpBarY, hpBarWidth, hpBarHeight, 5);
-    ctx.fill();
+    // ===== LIVES COUNTER: ❤️ x 3 =====
+    const livesY = barY + barHeight + 8 * scale;
+    const heartSize = 22 * scale;
 
-    // HP bar fill
-    const hpPercent = playerLifeHP / LIFE_MAX_HP;
-    const gradient = ctx.createLinearGradient(hpBarX, 0, hpBarX + hpBarWidth, 0);
-    gradient.addColorStop(0, '#ff4466');
-    gradient.addColorStop(1, '#ffaa00');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.roundRect(hpBarX, hpBarY, hpBarWidth * hpPercent, hpBarHeight, 5);
-    ctx.fill();
+    // Draw heart icon
+    if (loveImage && loveImage.complete) {
+        ctx.drawImage(loveImage, barX, livesY, heartSize, heartSize);
+    } else {
+        ctx.font = `${Math.floor(18 * scale)}px Arial`;
+        ctx.fillStyle = '#ff4466';
+        ctx.textAlign = 'left';
+        ctx.fillText('❤️', barX, livesY + 16 * scale);
+    }
 
-    // HP text
-    ctx.font = `bold ${Math.floor(10 * scale)}px Orbitron, sans-serif`;
+    // Draw "x N" text
+    ctx.font = `bold ${Math.floor(16 * scale)}px Orbitron, sans-serif`;
     ctx.fillStyle = '#ffffff';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${playerLifeHP}/${LIFE_MAX_HP}`, canvas.width / 2, hpBarY + 12 * scale);
+    ctx.textAlign = 'left';
+    ctx.fillText(`x ${playerLives}`, barX + heartSize + 5 * scale, livesY + 17 * scale);
 
-    // Immunity indicator
+    // Immunity indicator (next to lives)
     if (isImmune) {
         const immuneTimeLeft = Math.max(0, (immuneEndTime - Date.now()) / 1000);
         ctx.font = `bold ${Math.floor(12 * scale)}px Orbitron, sans-serif`;
         ctx.fillStyle = '#00ffff';
-        ctx.textAlign = 'right';
-        ctx.fillText(`🛡️ ${immuneTimeLeft.toFixed(1)}s`, hpBarX + hpBarWidth + 70 * scale, hpBarY + 12 * scale);
-    }
-
-    // Weapon timer (if secondary weapon active)
-    if (secondaryWeapon) {
-        const timeLeft = Math.max(0, secondaryWeaponEndTime - Date.now());
-        ctx.font = `bold ${Math.floor(10 * scale)}px Orbitron, sans-serif`;
-        ctx.fillStyle = '#00ddff';
-        ctx.textAlign = 'center';
-        ctx.fillText(`⚡ ${(timeLeft / 1000).toFixed(1)}s`, canvas.width / 2, hpBarY + 30 * scale);
+        ctx.fillText(`🛡️ ${immuneTimeLeft.toFixed(1)}s`, barX + heartSize + 55 * scale, livesY + 17 * scale);
     }
 
     // ===== TOP RIGHT: STATS =====
@@ -1243,45 +1427,53 @@ function drawUI(isInDodgePhase: boolean, elapsed: number): void {
     ctx.fillText(`🏆 ${gameStats.score}`, statsX, 32 * scale);
 
     // Boss status indicator
+    // Boss status indicator
     if (bossRocket) {
         ctx.fillStyle = '#ff4444';
         const bossHpPercent = Math.round((bossRocket.hp / bossRocket.maxHp) * 100);
         ctx.fillText(`👹 ${bossHpPercent}%`, statsX, 50 * scale);
-    } else if (!bossSpawned) {
-        const BOSS_SPAWN_TIME = 9000;
-        const timeUntilBoss = Math.max(0, Math.ceil((BOSS_SPAWN_TIME - elapsed) / 1000));
+    } else if (enemySpawnQueue.length > 0 || enemyRockets.length > 0) {
         ctx.fillStyle = '#ffaa00';
-        ctx.fillText(`👹 ${timeUntilBoss}s`, statsX, 50 * scale);
+        ctx.fillText(`👹 WAVE`, statsX, 50 * scale);
     } else {
-        ctx.fillStyle = '#00ff88';
-        ctx.fillText(`👹 ✓`, statsX, 50 * scale);
+        ctx.fillStyle = '#ff0000';
+        ctx.fillText(`👹 !!!`, statsX, 50 * scale);
     }
 
     ctx.fillStyle = '#ff6666';
     ctx.fillText(`🚀 ${enemyRockets.length}`, statsX, 68 * scale);
 
-    // ===== PHASE INDICATOR =====
-    ctx.textAlign = 'center';
-    ctx.font = `bold ${Math.floor(16 * scale)}px Orbitron, sans-serif`;
+    // ===== TOP CENTER: PHASE INDICATOR =====
+    // ctx.textAlign = 'center';
+    // ctx.font = `bold ${Math.floor(16 * scale)}px Orbitron, sans-serif`;
 
-    const phaseY = isMobile ? 50 : 65;
-    if (isInDodgePhase) {
-        const remaining = Math.ceil((DODGE_PHASE_DURATION - elapsed) / 1000);
-        ctx.fillStyle = '#ff6b6b';
-        ctx.fillText(`🔴 SPREAD + ⏱️ ${remaining}s`, canvas.width / 2, phaseY);
-    } else if (!secondaryWeapon) {
-        ctx.fillStyle = '#00ff88';
-        ctx.fillText(isMobile ? '🎯 CATCH POWER-UP!' : '🔴 SPREAD | 🎯 CATCH POWER-UP!', canvas.width / 2, phaseY);
-    } else {
-        // Dual weapon display
-        const secondaryNames: Record<WeaponType, string> = {
-            'spread': '🔴 SPREAD',
-            'laser': '🔵 LASER',
-            'magnetic': '🟣 MAGNET'
-        };
-        ctx.fillStyle = '#00ffaa';
-        ctx.fillText(isMobile ? `${secondaryNames[secondaryWeapon]} DUAL!` : `🔴 SPREAD + ${secondaryNames[secondaryWeapon]} (DUAL!)`, canvas.width / 2, phaseY);
-    }
+    // const phaseY = isMobile ? 50 : 65;
+    // if (isInDodgePhase) {
+    //     const remaining = Math.ceil((DODGE_PHASE_DURATION - elapsed) / 1000);
+    //     ctx.fillStyle = '#ff6b6b';
+    //     ctx.fillText(`🔴 SPREAD + ⏱️ ${remaining}s`, canvas.width / 2, phaseY);
+    // } else if (!secondaryWeapon) {
+    //     ctx.fillStyle = '#00ff88';
+    //     ctx.fillText(isMobile ? '🎯 CATCH POWER-UP!' : '🔴 SPREAD | 🎯 CATCH POWER-UP!', canvas.width / 2, phaseY);
+    // } else {
+    //     // Dual weapon display
+    //     const secondaryNames: Record<WeaponType, string> = {
+    //         'spread': '🔴 SPREAD',
+    //         'laser': '🔵 LASER',
+    //         'magnetic': '🟣 MAGNET'
+    //     };
+    //     ctx.fillStyle = '#00ffaa';
+    //     ctx.fillText(isMobile ? `${secondaryNames[secondaryWeapon]} DUAL!` : `🔴 SPREAD + ${secondaryNames[secondaryWeapon]} (DUAL!)`, canvas.width / 2, phaseY);
+    // }
+
+    // // Weapon timer (if secondary weapon active)
+    // if (secondaryWeapon) {
+    //     const timeLeft = Math.max(0, secondaryWeaponEndTime - Date.now());
+    //     ctx.font = `bold ${Math.floor(10 * scale)}px Orbitron, sans-serif`;
+    //     ctx.fillStyle = '#00ddff';
+    //     ctx.textAlign = 'center';
+    //     ctx.fillText(`⚡ ${(timeLeft / 1000).toFixed(1)}s`, canvas.width / 2, phaseY + 20 * scale);
+    // }
 
     // ===== BOTTOM: CONTROLS (mobile-friendly) =====
     ctx.textAlign = 'center';
@@ -1289,6 +1481,48 @@ function drawUI(isInDodgePhase: boolean, elapsed: number): void {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     const controlsText = isMobile ? '👆 TAP & DRAG TO MOVE' : 'MOVE: Mouse/WASD  |  ATTACK: Auto-fire';
     ctx.fillText(controlsText, canvas.width / 2, canvas.height - 12 * scale);
+
+    // ===== BOSS WARNING OVERLAY =====
+    if (showBossWarning) {
+        ctx.save();
+
+        // Red overlay for menacing atmosphere (pulsing)
+        const overlayAlpha = 0.15 + Math.sin(Date.now() / 200) * 0.1;
+        ctx.fillStyle = `rgba(255, 0, 0, ${overlayAlpha})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Vignette effect (darker edges)
+        const gradient = ctx.createRadialGradient(
+            canvas.width / 2, canvas.height / 2, 0,
+            canvas.width / 2, canvas.height / 2, canvas.width * 0.7
+        );
+        gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        gradient.addColorStop(1, 'rgba(100, 0, 0, 0.4)');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Warning Text
+        ctx.fillStyle = `rgba(255, 0, 0, ${0.5 + Math.sin(Date.now() / 100) * 0.5})`;
+        ctx.font = `bold ${Math.floor(48 * scale)}px "Orbitron", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('⚠ WARNING ⚠', canvas.width / 2, canvas.height / 2 - 20 * scale);
+        ctx.font = `bold ${Math.floor(24 * scale)}px "Orbitron", sans-serif`;
+        ctx.fillText('BOSS APPROACHING', canvas.width / 2, canvas.height / 2 + 30 * scale);
+
+        ctx.restore();
+    }
+
+    // ===== BOSS PHASE 3 RAGE OVERLAY =====
+    if (bossRocket && bossRocket.phase === 3) {
+        ctx.save();
+
+        // Pulsing red rage overlay (faster pulse)
+        const rageAlpha = 0.08 + Math.sin(Date.now() / 150) * 0.06;
+        ctx.fillStyle = `rgba(200, 0, 0, ${rageAlpha})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.restore();
+    }
 }
 
 
@@ -1321,7 +1555,8 @@ function spawnBossRocket(): void {
         laserTimer: 0,
         isLaserFiring: false,
         laserWarning: false,
-        invulnerable: false
+        invulnerable: false,
+        laserDamageTick: 0
     };
 }
 
@@ -1342,8 +1577,19 @@ function updateBossRocket(now: number): void {
 
         // After stopping, follow player's horizontal position
         const playerCenterX = player.x + player.width / 2;
-        // Phase 2: Slower movement (tanky), Phase 3: Faster
-        const bossFollowSpeed = bossRocket.phase === 3 ? 8 : (bossRocket.phase === 2 ? 1 : 3);
+        // Phase 2: Slower movement (tanky), Phase 3: 2X SPEED + CRAZY ERRATIC
+        const bossFollowSpeed = bossRocket.phase === 3 ? 16 : (bossRocket.phase === 2 ? 1 : 3);
+
+        // Phase 3: INTENSE erratic jitter movement (very hard to hit!)
+        if (bossRocket.phase === 3) {
+            const jitterX = (Math.random() - 0.5) * 30; // 2x wider jitter
+            const jitterY = (Math.random() - 0.5) * 15; // 2x vertical jitter
+            bossRocket.x += jitterX;
+            bossRocket.y += jitterY;
+            // Keep boss in bounds
+            bossRocket.x = Math.max(100, Math.min(canvas.width - 100, bossRocket.x));
+            bossRocket.y = Math.max(targetY - 50, Math.min(targetY + 50, bossRocket.y));
+        }
 
         if (Math.abs(bossRocket.x - playerCenterX) > 5) {
             if (bossRocket.x < playerCenterX) {
@@ -1357,8 +1603,8 @@ function updateBossRocket(now: number): void {
     // PHASE TRANSITIONS
     const hpPercent = bossRocket.hp / bossRocket.maxHp;
 
-    // Enter Phase 2 (Minions) at 66% HP
-    if (bossRocket.phase === 1 && hpPercent < 0.66) {
+    // Enter Phase 2 (Minions) at 75% HP
+    if (bossRocket.phase === 1 && hpPercent < 0.75) {
         bossRocket.phase = 2;
         bossRocket.invulnerable = true;
         // Spawn 2 Minions
@@ -1388,8 +1634,8 @@ function updateBossRocket(now: number): void {
         audioManager.playSoundEffect('powerup');
         triggerScreenShake(5, 500);
     }
-    // Enter Phase 3 (Rage/Laser) at 33% HP (must kill minions first)
-    else if (bossRocket.phase === 2 && bossRocket.minions.length === 0 && hpPercent < 0.33) {
+    // Enter Phase 3 (Rage/Laser) immediately after minions are killed
+    else if (bossRocket.phase === 2 && bossRocket.minions.length === 0) {
         bossRocket.phase = 3;
         bossRocket.laserTimer = 0;
         audioManager.playSoundEffect('explosion'); // Rage sound
@@ -1459,11 +1705,16 @@ function updateBossRocket(now: number): void {
 
         if (bossRocket.laserTimer > 1000) {
             bossRocket.isLaserFiring = true;
-            // Laser Damage (Rect collision)
-            const laserWidth = 500; // MAXIMUM LASER
-            if (Math.abs(player.x - bossRocket.x) < laserWidth / 2 + player.width / 2) {
-                applyDamage(1); // Rapid damage
-                triggerScreenShake(2, 50);
+            // Laser Damage (Interval Based)
+            const damageInterval = currentDifficulty === 'hard' ? 150 : (currentDifficulty === 'medium' ? 300 : 500);
+
+            if (now - (bossRocket.laserDamageTick || 0) > damageInterval) {
+                const laserWidth = 200; // Hitbox width
+                if (Math.abs(player.x - bossRocket.x) < laserWidth / 2 + player.width / 2) {
+                    applyDamage(1);
+                    triggerScreenShake(3, 100);
+                }
+                bossRocket.laserDamageTick = now;
             }
         } else {
             bossRocket.isLaserFiring = false;
@@ -1876,9 +2127,27 @@ type SpawnDirection = 'top' | 'top-left' | 'top-right' | 'left' | 'right';
 function spawnEnemyRocket(): void {
     if (!canvas) return;
 
-    // Random spawn direction
-    const directions: SpawnDirection[] = ['top', 'top-left', 'top-right', 'left', 'right'];
-    const direction = directions[Math.floor(Math.random() * directions.length)];
+    // Check Queue
+    if (enemySpawnQueue.length === 0) return;
+
+    const nextType = enemySpawnQueue.shift(); // Get next enemy type
+
+    if (nextType === 'spinner') {
+        spawnSquadron();
+        return;
+    }
+
+    // For Basic and Sniper
+    // Basic spawns from any side, Sniper usually top
+    let direction: SpawnDirection = 'top';
+
+    if (nextType === 'basic') {
+        const directions: SpawnDirection[] = ['top', 'top-left', 'top-right', 'left', 'right'];
+        direction = directions[Math.floor(Math.random() * directions.length)];
+    } else {
+        // Sniper prefers top
+        direction = 'top';
+    }
 
     let startX: number;
     let startY: number;
@@ -1918,73 +2187,123 @@ function spawnEnemyRocket(): void {
             break;
     }
 
-    enemyRockets.push({
+    // Create Base Enemy
+    const enemy: any = {
         id: enemyIdCounter++,
         x: startX,
         y: startY,
-        z: 0.8, // Start visible
-        width: 40,
-        height: 50,
+        z: 0.8,
+        width: 55,
+        height: 65,
         speed: 0.004,
-        hp: 50,
+        hp: 50, // Default Basic HP
         maxHp: 50,
-        laneX: 0, // Not used for screen-space movement
+        laneX: 0,
         lastFireTime: 0,
-        // @ts-ignore - adding custom properties for directional movement
         speedX: speedX,
         speedY: speedY,
         direction: direction,
         type: 'basic',
         state: 'moving',
         stateTimer: 0,
-        angle: 0
-    });
+        angle: 0,
+        imageVariant: Math.floor(Math.random() * 4) // Assign random variant (0-3)
+    };
 
-    // Randomly upgrade to special types (20% chance each)
-    const enemy = enemyRockets[enemyRockets.length - 1];
-    const rand = Math.random();
-
-    if (rand < 0.2) {
-        // Sniper: Spawn Top, Move Down -> Stop -> Shoot -> Retreat
+    // Apply Specific Stats
+    if (nextType === 'sniper') {
         enemy.type = 'sniper';
         enemy.hp = 80;
         enemy.maxHp = 80;
         enemy.speed = 3;
-        enemy.x = Math.random() * (canvas.width - 100) + 50; // Random X within bounds
+        // Sniper override position logic to ensure it enters screen then stops
+        // Force Top entry for sniper to look good
+        enemy.x = Math.random() * (canvas.width - 100) + 50;
         enemy.y = -60;
         enemy.targetY = canvas.height * 0.15 + Math.random() * canvas.height * 0.2; // Stop point
-        enemy.state = 'moving';
-    } else if (rand < 0.4) {
-        // Spinner: V-Shape Movement (Obstacle)
-        enemy.type = 'spinner';
-        enemy.hp = 70;
-        enemy.maxHp = 70;
-        enemy.speed = 0; // Not used directly, using speedX/Y
-
-        // Spawn from Left, Right, or Top
-        const spawnSide = Math.random();
-        if (spawnSide < 0.33) {
-            // Left
-            enemy.x = -60;
-            enemy.y = Math.random() * 200;
-            enemy.speedX = 3 + Math.random() * 2; // Move Right
-            enemy.speedY = 2 + Math.random() * 2; // Move Down
-        } else if (spawnSide < 0.66) {
-            // Right
-            enemy.x = canvas.width + 60;
-            enemy.y = Math.random() * 200;
-            enemy.speedX = -(3 + Math.random() * 2); // Move Left
-            enemy.speedY = 2 + Math.random() * 2; // Move Down
-        } else {
-            // Top
-            enemy.x = Math.random() * canvas.width;
-            enemy.y = -60;
-            enemy.speedX = (Math.random() - 0.5) * 4; // Random X
-            enemy.speedY = 3 + Math.random() * 2; // Move Down Fast
-        }
+        // Reset speed for movement logic
+        enemy.speedX = 0;
+        enemy.speedY = 3;
     }
 
-    enemiesSpawned++;
+    enemyRockets.push(enemy);
+}
+
+function spawnSquadron(): void {
+    if (!canvas) return;
+
+    // Pattern Selection with Anti-Repeat
+    const patterns = ['sine', 'cross', 'u_turn'];
+    let selectedPattern = patterns[Math.floor(Math.random() * patterns.length)];
+
+    if (selectedPattern === lastSquadronType) {
+        // Prevent duplicate pattern check (simple cycle)
+        const idx = patterns.indexOf(selectedPattern);
+        selectedPattern = patterns[(idx + 1) % patterns.length];
+    }
+    lastSquadronType = selectedPattern;
+
+    const squadronSize = selectedPattern === 'cross' ? 12 : 6;
+
+    const groupSide = Math.random() < 0.5 ? 'left' : 'right';
+
+    for (let i = 0; i < squadronSize; i++) {
+        let pathType: any;
+        let startX: number;
+        let startY: number = -100;
+        let timeOffset = i * 300; // default 150ms gap
+
+        // Configure Pattern
+        if (selectedPattern === 'sine') {
+            pathType = groupSide === 'left' ? 'sine_left' : 'sine_right';
+            startX = groupSide === 'left' ? canvas.width * 0.1 : canvas.width * 0.9;
+
+        } else if (selectedPattern === 'cross') {
+            // Split group: First half left, Next half right
+            const halfSize = squadronSize / 2;
+            if (i < halfSize) {
+                pathType = 'cross_left';
+                startX = canvas.width * 0.1;
+                timeOffset = i * 150;
+            } else {
+                pathType = 'cross_right';
+                startX = canvas.width * 0.9;
+                timeOffset = (i - halfSize) * 150; // Sync with first group
+            }
+
+        } else { // u_turn
+            pathType = groupSide === 'left' ? 'u_turn_left' : 'u_turn_right';
+            // U-Turn starts closer to center so they have room to turn out
+            startX = groupSide === 'left' ? canvas.width * 0.3 : canvas.width * 0.7;
+        }
+
+        enemyRockets.push({
+            id: enemyIdCounter++,
+            x: startX,
+            y: startY,
+            z: 0.8,
+            width: 50,
+            height: 50,
+            speed: 3 * (canvas.width < 768 ? 0.7 : 1),
+            hp: 40,
+            maxHp: 40,
+            laneX: 0,
+            lastFireTime: 0,
+            // @ts-ignore
+            pathType: pathType,
+            initialX: startX,
+            timeOffset: timeOffset,
+            enterTime: Date.now() + timeOffset,
+
+            speedX: 0,
+            speedY: 0, // Used for velocity tracking
+            direction: 'down',
+            type: 'spinner',
+            state: 'moving',
+            stateTimer: 0,
+            angle: Math.PI
+        });
+    }
 }
 
 function updateEnemyRockets(now: number): void {
@@ -2027,28 +2346,80 @@ function updateEnemyRockets(now: number): void {
             }
 
         } else if (enemy.type === 'spinner') {
-            // Spinner: V-Shape Bounce (No Shooting, No Spiral)
-            // Move
-            enemy.x += (enemy.speedX || 0);
-            enemy.y += (enemy.speedY || 0);
+            // SQUADRON MOVEMENT 
 
-            // Fixed rotation (no spinning) to emphasize it's not a spiral
-            // Point down or in direction of movement?
-            // Let's point in direction of movement
-            enemy.angle = Math.atan2(enemy.speedY || 0, enemy.speedX || 0) + Math.PI / 2;
+            if (now < (enemy.enterTime || 0)) continue;
 
-            // Bounce Logic (V-Shape)
-            // If hits bottom bound, bounce Y up
-            if (enemy.speedY > 0 && enemy.y > canvas.height * 0.75) {
-                enemy.speedY = -enemy.speedY; // Bounce up
+            const prevX = enemy.x;
+            const prevY = enemy.y;
+            const speedScale = canvas.width < 768 ? 0.7 : 1;
+            const baseSpeed = 3 * speedScale;
+
+            // --- PATTERN MOVEMENT LOGIC ---
+
+            if (enemy.pathType.startsWith('sine')) {
+                // SINE WAVE: Move down, oscillate X
+                enemy.y += baseSpeed;
+
+                const frequency = 0.005;
+                const amplitude = canvas.width * 0.25;
+
+                if (enemy.pathType === 'sine_left') {
+                    const traverseX = enemy.initialX + (enemy.y * 0.2);
+                    enemy.x = traverseX + Math.sin(enemy.y * frequency) * amplitude;
+                } else {
+                    const traverseX = enemy.initialX - (enemy.y * 0.2);
+                    enemy.x = traverseX + Math.sin(enemy.y * frequency) * amplitude;
+                }
+
+            } else if (enemy.pathType.startsWith('cross')) {
+                // CROSS: Move down + Move towards opposite side
+                enemy.y += baseSpeed;
+                const crossSpeed = baseSpeed * 1.2;
+
+                if (enemy.pathType === 'cross_left') {
+                    enemy.x += crossSpeed; // Left -> Right
+                } else {
+                    enemy.x -= crossSpeed; // Right -> Left
+                }
+
+            } else if (enemy.pathType.startsWith('u_turn')) {
+                // U-TURN: Dive -> Turn Out -> Fly Up
+                const turnStartHeight = canvas.height * 0.4;
+
+                if (enemy.y < turnStartHeight && enemy.speedY >= 0) {
+                    // Phase 1: Dive
+                    enemy.y += baseSpeed * 1.5;
+                    enemy.speedY = baseSpeed * 1.5; // Track speed
+                } else {
+                    // Phase 2: Turn and Fly Up
+                    // Simulating turn physics by modifying velocity
+                    enemy.speedY -= 0.15 * speedScale; // Accelerate upwards (gravity reverse)
+                    enemy.y += enemy.speedY; // Apply speed
+
+                    const turnOutSpeed = 2 * speedScale;
+                    if (enemy.pathType === 'u_turn_left') {
+                        enemy.x -= turnOutSpeed; // Curve Left (Out)
+                    } else {
+                        enemy.x += turnOutSpeed; // Curve Right (Out)
+                    }
+                }
             }
 
-            // Remove if off screen
-            if (enemy.y < -100 && (enemy.speedY || 0) < 0) {
-                enemy.hp = 0; // Exited top
+            // --- END PATTERN LOGIC ---
+
+            // Calculate Angle
+            const vx = enemy.x - prevX;
+            const vy = enemy.y - prevY;
+            if (Math.abs(vx) > 0.1 || Math.abs(vy) > 0.1) {
+                enemy.angle = Math.atan2(vy, vx) + Math.PI / 2;
             }
-            if ((enemy.x < -100 || enemy.x > canvas.width + 100) && enemy.y > 0) {
-                enemy.hp = 0; // Exited side
+
+            // Clean up - remove only if REALLY far off screen (allow U-turns to go up)
+            if (enemy.y > canvas.height + 200 || enemy.y < -300 || enemy.x < -300 || enemy.x > canvas.width + 300) {
+                enemyRockets.splice(i, 1);
+                i--;
+                continue;
             }
 
         } else {
@@ -2066,20 +2437,21 @@ function updateEnemyRockets(now: number): void {
             }
         }
 
-        // Calculate rotation
-        let angle = Math.PI; // Face down default
-        if (enemy.type === 'basic' || (enemy.type === 'sniper' && (enemy.state === 'aiming' || enemy.state === 'cooldown'))) {
-            // Face player
-            angle = Math.atan2(dy, dx) + Math.PI / 2;
-        } else if (enemy.type === 'spinner') {
-            angle = enemy.angle;
+        // Calculate rotation for non-spinner types
+        if (enemy.type !== 'spinner') {
+            let angle = Math.PI; // Face down default
+            if (enemy.type === 'basic' || (enemy.type === 'sniper' && (enemy.state === 'aiming' || enemy.state === 'cooldown'))) {
+                // Face player
+                angle = Math.atan2(dy, dx) + Math.PI / 2;
+            }
+            enemy.angle = angle;
         }
 
-        drawEnemyRocketAtPosition(enemy, angle);
+        drawEnemyRocketAtPosition(enemy, enemy.angle);
 
-        // Remove if reached player area or off screen for too long
-        if (enemy.x < -150 || enemy.x > canvas.width + 150 ||
-            enemy.y < -150 || enemy.y > canvas.height + 150) {
+        // Remove if off screen (for basic/sniper)
+        if (enemy.type !== 'spinner' && (enemy.x < -150 || enemy.x > canvas.width + 150 ||
+            enemy.y < -150 || enemy.y > canvas.height + 150)) {
             enemyRockets.splice(i, 1);
         }
     }
@@ -2097,6 +2469,12 @@ function drawEnemyRocketAtPosition(enemy: any, angle: number): void {
 
     // Select sprite based on type
     let img = enemyRocketImage;
+
+    // Use variant for basic enemy
+    if (enemy.type === 'basic' && enemy.imageVariant !== undefined && enemyBasicImages[enemy.imageVariant]) {
+        img = enemyBasicImages[enemy.imageVariant];
+    }
+
     if (enemy.type === 'sniper' && enemySniperImage) img = enemySniperImage;
     if (enemy.type === 'spinner' && enemySpinnerImage) img = enemySpinnerImage;
 
@@ -2170,6 +2548,8 @@ function spawnEnemyBulletStraight(enemy: EnemyRocket, dx: number, dy: number, di
         dirY: dirY
     });
 }
+
+
 
 function spawnEnemyBullet(enemy: EnemyRocket): void {
     if (!player) return;
@@ -2296,14 +2676,6 @@ function drawEnemyRocket(enemy: EnemyRocket, pos: { x: number; y: number; scale:
 
     }
     ctx.restore();
-
-    // HP bar
-    const barWidth = w * 0.8;
-    const barHeight = 4;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(pos.x - barWidth / 2, pos.y - h / 2 - 10, barWidth, barHeight);
-    ctx.fillStyle = '#ff4444';
-    ctx.fillRect(pos.x - barWidth / 2, pos.y - h / 2 - 10, barWidth * (enemy.hp / enemy.maxHp), barHeight);
 }
 
 function checkEnemyRocketCollision(): boolean {
@@ -2858,17 +3230,6 @@ function drawPlayer(): void {
 
     ctx.save();
 
-    // Muzzle Flash
-    if (Date.now() < muzzleFlashUntil) {
-        ctx.fillStyle = 'rgba(255, 255, 200, 0.8)';
-        ctx.beginPath();
-        ctx.arc(player.x, player.y - 30, 25, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.shadowBlur = 30;
-        ctx.shadowColor = '#ffffff';
-    }
-
     // Flashing effect when immune
     if (isImmune) {
         const flashRate = Math.floor(Date.now() / 100) % 2;
@@ -2880,6 +3241,7 @@ function drawPlayer(): void {
         ctx.shadowColor = '#00ffff';
     }
 
+    // Draw rocket first
     if (player.image.complete) {
         ctx.translate(player.x, player.y);
         ctx.rotate(player.tilt * Math.PI / 180);
@@ -2899,6 +3261,37 @@ function drawPlayer(): void {
     }
 
     ctx.restore();
+
+    // Muzzle Flash - Radial Blur Glow Effect (drawn AFTER rocket so it appears on top)
+    if (Date.now() < muzzleFlashUntil) {
+        const flashX = player.x;
+        const flashY = player.y - player.height / 2 + 15; // Position slightly inside rocket body
+        const flashSize = 35;
+
+        // Calculate fade based on remaining time (for smooth fade out)
+        const flashDuration = 80; // ms
+        const elapsed = flashDuration - (muzzleFlashUntil - Date.now());
+        const fadeProgress = Math.min(1, elapsed / flashDuration);
+        const alpha = 1 - fadeProgress * 0.5; // Fade from 1 to 0.5
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter'; // Additive blending
+
+        // Create radial gradient for blur effect
+        const gradient = ctx.createRadialGradient(flashX, flashY, 0, flashX, flashY, flashSize);
+        gradient.addColorStop(0, `rgba(255, 255, 255, ${alpha * 0.95})`);        // White core
+        gradient.addColorStop(0.2, `rgba(255, 255, 200, ${alpha * 0.85})`);      // Light yellow
+        gradient.addColorStop(0.4, `rgba(255, 230, 120, ${alpha * 0.6})`);       // Yellow
+        gradient.addColorStop(0.65, `rgba(255, 200, 80, ${alpha * 0.3})`);       // Golden
+        gradient.addColorStop(0.85, `rgba(255, 150, 50, ${alpha * 0.1})`);       // Orange tint
+        gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');                        // Fade out
+
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(flashX, flashY, flashSize, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
 }
 
 // ============ WIN CONDITION ============
@@ -2934,6 +3327,9 @@ function updateUI(): void {
 
 function endGame(): void {
     isGameRunning = false;
+
+    // Stop all sounds
+    audioManager.stopAllSounds();
 
     if (gameLoop) {
         cancelAnimationFrame(gameLoop);
@@ -2988,6 +3384,9 @@ function endGame(): void {
 
 export function cleanupMiniGame(): void {
     isGameRunning = false;
+
+    // Stop all sounds
+    audioManager.stopAllSounds();
 
     if (gameLoop) {
         cancelAnimationFrame(gameLoop);

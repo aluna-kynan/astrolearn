@@ -35,10 +35,10 @@ const difficultyConfigs = {
         },
         asteroidSpawnRate: 1500,
         totalAsteroids: 12,
-        hasBoss: false,
-        bossHP: 0,
-        bossSize: 0,
-        gameDuration: 30
+        hasBoss: true,
+        bossHP: 25000,
+        bossSize: 100,
+        gameDuration: 9999
     },
     medium: {
         weapon: {
@@ -62,10 +62,10 @@ const difficultyConfigs = {
         },
         asteroidSpawnRate: 900,
         totalAsteroids: 20,
-        hasBoss: false,
-        bossHP: 0,
-        bossSize: 0,
-        gameDuration: 40
+        hasBoss: true,
+        bossHP: 35000,
+        bossSize: 120,
+        gameDuration: 9999
     },
     hard: {
         weapon: {
@@ -90,9 +90,9 @@ const difficultyConfigs = {
         asteroidSpawnRate: 500,
         totalAsteroids: 35,
         hasBoss: true,
-        bossHP: 100,
-        bossSize: 120,
-        gameDuration: 50
+        bossHP: 85000,
+        bossSize: 140,
+        gameDuration: 9999
     }
 };
 const quizQuestions = {

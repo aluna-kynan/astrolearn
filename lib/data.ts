@@ -57,20 +57,20 @@ export const difficultyConfigs: Record<DifficultyLevel, DifficultyConfig> = {
             bulletSpeed: 10,
             bulletWidth: 6,
             bulletHeight: 15,
-            damage: 80, // Updated damage
+            damage: 80,
             color: '#ff6b6b',
             spreadCount: 3,
             isAutoFire: true
         },
         asteroidHP: 1,
         asteroidSize: { min: 25, max: 35 },
-        asteroidSpeed: { min: 1, max: 2 }, // Slower
-        asteroidSpawnRate: 1500, // Slower spawn - sparse meteors
-        totalAsteroids: 12, // Fewer meteors
-        hasBoss: false,
-        bossHP: 0,
-        bossSize: 0,
-        gameDuration: 30
+        asteroidSpeed: { min: 1, max: 2 },
+        asteroidSpawnRate: 1500,
+        totalAsteroids: 12,
+        hasBoss: true,
+        bossHP: 25000,
+        bossSize: 100,
+        gameDuration: 9999
     },
     medium: {
         weapon: {
@@ -79,19 +79,19 @@ export const difficultyConfigs: Record<DifficultyLevel, DifficultyConfig> = {
             bulletSpeed: 15,
             bulletWidth: 8,
             bulletHeight: 40,
-            damage: 100, // Updated damage
+            damage: 100,
             color: '#00d4ff',
             isAutoFire: true
         },
         asteroidHP: 2,
         asteroidSize: { min: 30, max: 45 },
         asteroidSpeed: { min: 2, max: 3.5 },
-        asteroidSpawnRate: 900, // Moderate spawn
-        totalAsteroids: 20, // Moderate meteors
-        hasBoss: false,
-        bossHP: 0,
-        bossSize: 0,
-        gameDuration: 40
+        asteroidSpawnRate: 900,
+        totalAsteroids: 20,
+        hasBoss: true,
+        bossHP: 35000,
+        bossSize: 120,
+        gameDuration: 9999
     },
     hard: {
         weapon: {
@@ -100,19 +100,19 @@ export const difficultyConfigs: Record<DifficultyLevel, DifficultyConfig> = {
             bulletSpeed: 8,
             bulletWidth: 10,
             bulletHeight: 20,
-            damage: 50, // Updated damage
+            damage: 50,
             color: '#9d4edd',
             isAutoFire: true
         },
         asteroidHP: 2,
         asteroidSize: { min: 25, max: 40 },
-        asteroidSpeed: { min: 2.5, max: 4.5 }, // Faster
-        asteroidSpawnRate: 500, // Fast spawn - meteor rain
-        totalAsteroids: 35, // Dense meteor field
+        asteroidSpeed: { min: 2.5, max: 4.5 },
+        asteroidSpawnRate: 500,
+        totalAsteroids: 35,
         hasBoss: true,
-        bossHP: 100,
-        bossSize: 120,
-        gameDuration: 50
+        bossHP: 85000,
+        bossSize: 140,
+        gameDuration: 9999
     }
 };
 

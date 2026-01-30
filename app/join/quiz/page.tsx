@@ -13,6 +13,7 @@ export default function JoinQuizPage(): React.JSX.Element | null {
     const [buttonsDisabled, setButtonsDisabled] = useState<boolean>(false);
     const [showCountdown, setShowCountdown] = useState<boolean>(false);
     const [countdownNumber, setCountdownNumber] = useState<number>(3);
+    const [isFreezing, setIsFreezing] = useState<boolean>(false); // Freeze overlay to prevent question leak
 
     // Redirect if no questions
     useEffect(() => {
@@ -100,9 +101,14 @@ export default function JoinQuizPage(): React.JSX.Element | null {
                 setCountdownNumber(count);
             } else {
                 clearInterval(countdownInterval);
-                // Update question index just before navigation
+                // FREEZE SCREEN: Show freeze overlay BEFORE updating question index
+                setShowCountdown(false); // Hide countdown
+                setIsFreezing(true); // Show freeze overlay
+
+                // Update question index (component will NOT re-render visible question due to freeze)
                 setGameState(prev => ({ ...prev, currentQuestionIndex: nextIndex }));
-                // Navigate immediately while countdown is still visible
+
+                // Navigate immediately - freeze overlay covers the screen
                 router.push('/join/game');
             }
         }, 1000);
@@ -130,6 +136,19 @@ export default function JoinQuizPage(): React.JSX.Element | null {
                 <div className="countdown-overlay">
                     <div className="countdown-number">{countdownNumber}</div>
                 </div>
+            )}
+
+            {/* Freeze Overlay - prevents next question from being visible during transition */}
+            {isFreezing && (
+                <div className="freeze-overlay" style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    width: '100vw',
+                    height: '100vh',
+                    backgroundColor: 'var(--background-dark, #0a0a1a)',
+                    zIndex: 9999
+                }} />
             )}
 
             <section id="screen-quiz" className="screen active">
